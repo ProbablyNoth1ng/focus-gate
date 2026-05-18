@@ -1,0 +1,6 @@
+.vite*
+*temp*
+dist
+node_modules
+*.log
+release

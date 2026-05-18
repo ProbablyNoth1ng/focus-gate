@@ -1,0 +1,47 @@
+{
+  "name": "focusgate",
+  "version": "1.0.0",
+  "author": "Andrii",
+  "description": "Windows focus app that intercepts distraction apps and forces intention setting",
+  "main": "dist/electron/main.js",
+  "scripts": {
+    "dev": "npm run dev:copy-ps1 && npm run dev:tsc:once && concurrently -n vite,tsc,electron -c cyan,yellow,green \"npm run dev:vite\" \"npm run dev:tsc\" \"npm run dev:electron\"",
+    "dev:vite": "vite",
+    "dev:tsc": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "dev:tsc:once": "tsc -p tsconfig.electron.json",
+    "dev:electron": "wait-on http://localhost:5173 && nodemon --watch dist/electron --ext js --exec \"electron .\"",
+    "build": "npm run build:react && npm run fix-build && npm run build:electron",
+    "build:react": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "dist": "npm run build && electron-builder",
+    "dist:portable": "npm run build && electron-builder --win portable",
+    "dev:copy-ps1": "node -e \"const fs=require('fs');const path=require('path');fs.mkdirSync('dist/electron',{recursive:true});fs.copyFileSync('electron/wmiWatcher.ps1','dist/electron/wmiWatcher.ps1')\"",
+    "fix-build": "node scripts/fix-build.js"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "sql.js": "^1.12.0",
+    "electron-store": "^8.2.0",
+    "electron-updater": "^6.1.8",
+    "recharts": "^2.12.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.20",
+    "@types/sql.js": "^1.4.9",
+    "nodemon": "^3.1.0",
+    "wait-on": "^7.2.0",
+    "@types/react": "^18.2.58",
+    "@types/react-dom": "^18.2.19",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.18",
+    "concurrently": "^8.2.2",
+    "electron": "^29.1.1",
+    "electron-builder": "^24.13.3",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.3.3",
+    "vite": "^5.1.4"
+  },
+  "type": "commonjs"
+}

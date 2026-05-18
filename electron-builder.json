@@ -1,0 +1,56 @@
+{
+  "appId": "com.focusgate.app",
+  "productName": "FocusGate",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "assets/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "electron/wmiWatcher.ps1",
+      "to": "wmiWatcher.ps1"
+    },
+    {
+      "from": "assets/pssuspend.exe",
+      "to": "pssuspend.exe"
+    },
+    {
+      "from": "assets/logo.png",
+      "to": "logo.png"
+    },
+    {
+      "from": "assets/tray-active.png",
+      "to": "tray-active.png"
+    },
+    {
+      "from": "assets/tray-paused.png",
+      "to": "tray-paused.png"
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      },
+      {
+        "target": "portable",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "icon": "assets/logo.png"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "packElevateHelper": true
+  },
+  "publish": null
+}
