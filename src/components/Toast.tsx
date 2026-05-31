@@ -10,7 +10,16 @@ let nextId = 0
 type ToastListener = (msg: ToastMessage) => void
 const listeners: ToastListener[] = []
 
+let lastToastKey = ''
+let lastToastTimer: ReturnType<typeof setTimeout> | null = null
+
 export function showToast(text: string, type: ToastMessage['type'] = 'success') {
+  const key = `${type}:${text}`
+  if (key === lastToastKey) return 
+  lastToastKey = key
+  if (lastToastTimer) clearTimeout(lastToastTimer)
+  lastToastTimer = setTimeout(() => { lastToastKey = '' }, 600)
+
   const msg: ToastMessage = { id: nextId++, text, type }
   listeners.forEach(l => l(msg))
 }

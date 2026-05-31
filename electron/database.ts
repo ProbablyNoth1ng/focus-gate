@@ -11,10 +11,8 @@ let dbPath: string
 export async function initDatabase(): Promise<void> {
   dbPath = path.join(app.getPath('userData'), 'focusgate.db')
 
-  // Load the WASM binary directly as a Buffer — avoids any fetch/URL resolution issues in Electron
-  // sql.js ships sql-wasm.wasm in its dist/ folder next to the main JS file
   const sqlJsMainFile = require.resolve('sql.js')
-  // Possible locations: dist/sql-wasm.wasm or ../dist/sql-wasm.wasm relative to main file
+
   const candidates = [
     path.join(path.dirname(sqlJsMainFile), 'sql-wasm.wasm'),
     path.join(path.dirname(sqlJsMainFile), '..', 'dist', 'sql-wasm.wasm'),
@@ -31,8 +29,19 @@ export async function initDatabase(): Promise<void> {
   SQL = await initSqlJs({ wasmBinary })
 
   if (fs.existsSync(dbPath)) {
-    const fileBuffer = fs.readFileSync(dbPath)
-    db = new SQL.Database(fileBuffer)
+    try {
+      const fileBuffer = fs.readFileSync(dbPath)
+      if (fileBuffer.length === 0) {
+        throw new Error('Database file is empty')
+      }
+      db = new SQL.Database(fileBuffer)
+      db.run('SELECT 1')
+    } catch (loadErr) {
+      console.error('[DB] Existing database is corrupt, backing up and starting fresh:', loadErr)
+      const backupPath = dbPath + '.corrupt-' + Date.now()
+      try { fs.renameSync(dbPath, backupPath) } catch { }
+      db = new SQL.Database()
+    }
   } else {
     db = new SQL.Database()
   }
@@ -76,7 +85,6 @@ function persist(): void {
   fs.writeFileSync(dbPath, Buffer.from(data))
 }
 
-// Helper: run a SELECT and return rows as typed objects
 function queryAll<T>(sql: string, params: (string | number)[] = []): T[] {
   const stmt = db.prepare(sql)
   stmt.bind(params)
@@ -100,6 +108,7 @@ export function logIntention(
   wordCount: number,
   resumed: boolean
 ): void {
+  if (!db) return 
   db.run(
     `INSERT INTO intention_logs (timestamp, app_name, exe_path, purpose, word_count, resumed)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -110,6 +119,7 @@ export function logIntention(
 
 // Log the outcome of an interception: 'completed' = user submitted intention, 'dismissed' = user closed modal
 export function logInterceptionResult(appName: string, outcome: 'completed' | 'dismissed'): void {
+  if (!db) return  
   db.run(
     `INSERT INTO interception_results (timestamp, app_name, outcome) VALUES (?, ?, ?)`,
     [new Date().toISOString(), appName.toLowerCase(), outcome]
@@ -117,12 +127,12 @@ export function logInterceptionResult(appName: string, outcome: 'completed' | 'd
   persist()
 }
 
-// Dedup guard for logActivity — prevents multi-process apps (Discord, Telegram, etc.)
-// from counting as multiple launches when they spawn several processes at once.
+
 const recentlyLoggedActivity = new Map<string, number>()
 const ACTIVITY_DEDUP_MS = 15_000
 
 export function logActivity(appName: string, isBlocked = false): void {
+  if (!db) return 
   const key = appName.toLowerCase()
   const last = recentlyLoggedActivity.get(key)
   if (last && Date.now() - last < ACTIVITY_DEDUP_MS) return
@@ -168,7 +178,7 @@ export function getLogs(
 
 export function getStats(): StatsData {
   const now = new Date()
-  // Timestamps stored as UTC ISO. Boundaries computed as start-of-local-day in UTC.
+
   const localMidnightUTC = (offsetDays: number): string => {
     const d = new Date()
     d.setHours(0, 0, 0, 0)
@@ -179,9 +189,6 @@ export function getStats(): StatsData {
   const weekStart  = localMidnightUTC(-7)
   const monthStart = localMidnightUTC(-30)
 
-  // ALL stats come from interception_results — 1 row per app open, guaranteed.
-  // completed = user typed intention and opened app
-  // dismissed = user closed modal without opening
 
   const launchedToday          = (queryOne<{ c: number }>('SELECT COUNT(*) as c FROM interception_results WHERE timestamp >= ?', [todayStart])?.c) ?? 0
   const uniqueAppsEver         = (queryOne<{ c: number }>('SELECT COUNT(DISTINCT app_name) as c FROM interception_results')?.c) ?? 0

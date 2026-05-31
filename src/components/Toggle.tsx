@@ -7,7 +7,7 @@ interface ToggleProps {
 
 export function Toggle({ checked, onChange, label, disabled }: ToggleProps) {
   return (
-    <label style={{
+    <div style={{
       display: 'flex',
       alignItems: 'center',
       gap: 10,
@@ -45,6 +45,6 @@ export function Toggle({ checked, onChange, label, disabled }: ToggleProps) {
       {label && (
         <span style={{ fontSize: 14, color: 'var(--text-primary)' }}>{label}</span>
       )}
-    </label>
+    </div>
   )
 }

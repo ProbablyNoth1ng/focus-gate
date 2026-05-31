@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import type { AppSettings, BlockedApp } from '../../shared/ipc-types'
 import { AppListItem } from '../components/AppListItem'
 import { Toggle } from '../components/Toggle'
@@ -51,11 +51,43 @@ function FieldRow({ label, children, hint }: { label: string; children: React.Re
   )
 }
 
+const DEBOUNCE_MS = 500
+
 export function Settings({ settings, onSave }: SettingsProps) {
-  const save = (partial: Partial<AppSettings>) => {
+
+  const [minWordCount, setMinWordCount] = useState(settings.minWordCount)
+  const [countdownDelay, setCountdownDelay] = useState(settings.countdownDelay)
+  const [focusStart, setFocusStart] = useState(settings.focusStart)
+  const [focusEnd, setFocusEnd] = useState(settings.focusEnd)
+  const [localLaunchAtStartup, setLocalLaunchAtStartup] = useState(settings.launchAtStartup)
+  const [localDarkMode, setLocalDarkMode] = useState(settings.darkMode)
+  const [localFocusHoursEnabled, setLocalFocusHoursEnabled] = useState(settings.focusHoursEnabled)
+
+  useEffect(() => { setMinWordCount(settings.minWordCount) }, [settings.minWordCount])
+  useEffect(() => { setCountdownDelay(settings.countdownDelay) }, [settings.countdownDelay])
+  useEffect(() => { setFocusStart(settings.focusStart) }, [settings.focusStart])
+  useEffect(() => { setFocusEnd(settings.focusEnd) }, [settings.focusEnd])
+  useEffect(() => { setLocalLaunchAtStartup(settings.launchAtStartup) }, [settings.launchAtStartup])
+  useEffect(() => { setLocalDarkMode(settings.darkMode) }, [settings.darkMode])
+  useEffect(() => { setLocalFocusHoursEnabled(settings.focusHoursEnabled) }, [settings.focusHoursEnabled])
+
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingPartial = useRef<Partial<AppSettings>>({})
+
+  const debouncedSave = useCallback((partial: Partial<AppSettings>) => {
+    pendingPartial.current = { ...pendingPartial.current, ...partial }
+    if (debounceTimer.current) clearTimeout(debounceTimer.current)
+    debounceTimer.current = setTimeout(() => {
+      onSave(pendingPartial.current)
+      showToast('Settings saved')
+      pendingPartial.current = {}
+    }, DEBOUNCE_MS)
+  }, [onSave])
+
+  const save = useCallback((partial: Partial<AppSettings>) => {
     onSave(partial)
     showToast('Settings saved')
-  }
+  }, [onSave])
 
   const addApp = async () => {
     const result = await window.electronAPI.pickExe()
@@ -110,7 +142,6 @@ export function Settings({ settings, onSave }: SettingsProps) {
   return (
     <div style={{ padding: '4px 24px 24px', overflowY: 'auto', height: '100%' }}>
 
-      {/* Blocked Apps */}
       <Section>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
           <SectionHeader
@@ -158,7 +189,6 @@ export function Settings({ settings, onSave }: SettingsProps) {
         )}
       </Section>
 
-      {/* Interception Rules */}
       <Section>
         <SectionHeader
           title="Interception Rules"
@@ -171,8 +201,11 @@ export function Settings({ settings, onSave }: SettingsProps) {
           <input
             type="number"
             min={5} max={100}
-            value={settings.minWordCount}
-            onChange={e => save({ minWordCount: +e.target.value })}
+            value={minWordCount}
+            onChange={e => {
+              setMinWordCount(+e.target.value)
+              debouncedSave({ minWordCount: +e.target.value })
+            }}
             style={{ width: 70, textAlign: 'center' }}
           />
         </FieldRow>
@@ -184,11 +217,13 @@ export function Settings({ settings, onSave }: SettingsProps) {
             <input
               type="number"
               min={0} max={120}
-              value={settings.countdownDelay}
-              onChange={e => save({ countdownDelay: +e.target.value })}
+              value={countdownDelay}
+              onChange={e => {
+                setCountdownDelay(+e.target.value)
+                debouncedSave({ countdownDelay: +e.target.value })
+              }}
               style={{ width: 70, textAlign: 'center' }}
             />
-            
           </div>
         </FieldRow>
         <FieldRow
@@ -196,25 +231,34 @@ export function Settings({ settings, onSave }: SettingsProps) {
           hint="Only intercept within the configured time window"
         >
           <Toggle
-            checked={settings.focusHoursEnabled}
-            onChange={v => save({ focusHoursEnabled: v })}
+            checked={localFocusHoursEnabled}
+            onChange={v => {
+              setLocalFocusHoursEnabled(v)
+              debouncedSave({ focusHoursEnabled: v })
+            }}
           />
         </FieldRow>
-        {settings.focusHoursEnabled && (
+        {localFocusHoursEnabled && (
           <>
             <FieldRow label="Focus start time">
               <input
                 type="time"
-                value={settings.focusStart}
-                onChange={e => save({ focusStart: e.target.value })}
+                value={focusStart}
+                onChange={e => {
+                  setFocusStart(e.target.value)
+                  debouncedSave({ focusStart: e.target.value })
+                }}
                 style={{ width: 110 }}
               />
             </FieldRow>
             <FieldRow label="Focus end time">
               <input
                 type="time"
-                value={settings.focusEnd}
-                onChange={e => save({ focusEnd: e.target.value })}
+                value={focusEnd}
+                onChange={e => {
+                  setFocusEnd(e.target.value)
+                  debouncedSave({ focusEnd: e.target.value })
+                }}
                 style={{ width: 110 }}
               />
             </FieldRow>
@@ -222,7 +266,6 @@ export function Settings({ settings, onSave }: SettingsProps) {
         )}
       </Section>
 
-      {/* Startup & Tray */}
       <Section>
         <SectionHeader title="Startup & Tray" />
         <FieldRow
@@ -230,16 +273,22 @@ export function Settings({ settings, onSave }: SettingsProps) {
           hint="Start FocusGate automatically when you log in"
         >
           <Toggle
-            checked={settings.launchAtStartup}
-            onChange={v => save({ launchAtStartup: v })}
+            checked={localLaunchAtStartup}
+            onChange={v => {
+              setLocalLaunchAtStartup(v)
+              debouncedSave({ launchAtStartup: v })
+            }}
           />
         </FieldRow>
         <FieldRow
           label="Dark mode"
         >
           <Toggle
-            checked={settings.darkMode}
-            onChange={v => save({ darkMode: v })}
+            checked={localDarkMode}
+            onChange={v => {
+              setLocalDarkMode(v)
+              debouncedSave({ darkMode: v })
+            }}
           />
         </FieldRow>
         <FieldRow
@@ -259,7 +308,6 @@ export function Settings({ settings, onSave }: SettingsProps) {
         </FieldRow>
       </Section>
 
-      {/* Data */}
       <Section>
         <SectionHeader
           title="Data"
