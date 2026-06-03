@@ -3,6 +3,7 @@ import type {
   InterceptionPayload,
   IntentionLog,
   StatsData,
+  ActivityData,
 } from '../shared/ipc-types'
 
 declare global {
@@ -20,6 +21,7 @@ declare global {
       getStats: () => Promise<StatsData>
       clearLogs: () => Promise<{ success: boolean }>
       clearActivity: () => Promise<{ success: boolean }>
+      clearAll: () => Promise<{ success: boolean }>
       exportCsv: () => Promise<{ success: boolean; filePath?: string }>
       pickExe: () => Promise<{ exePath: string; name: string; icon: string } | null>
       submitIntention: (payload: {
@@ -34,6 +36,10 @@ declare global {
       getCurrentInterception: () => Promise<InterceptionPayload | null>
       pauseToggle: () => Promise<boolean>
       getPauseState: () => Promise<{ isPaused: boolean; pauseUntil: number | null }>
+      getActivity: () => Promise<ActivityData>
+      getActivityIcons: (appNames: string[]) => Promise<Record<string, string>>
+      hideApp: (appName: string) => Promise<string[]>
+      unhideApp: (appName: string) => Promise<string[]>
       onInterceptionStart: (cb: (payload: InterceptionPayload) => void) => () => void
       onSettingsUpdated: (cb: (settings: AppSettings) => void) => () => void
       windowMinimize: () => void

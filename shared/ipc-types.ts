@@ -18,6 +18,10 @@ export const IPC = {
   PAUSE_TOGGLE:        'pause:toggle',
   PAUSE_TIMED:         'pause:timed',
   GET_PAUSE_STATE:     'pause:getState',
+  GET_ACTIVITY:        'activity:get',
+  GET_ACTIVITY_ICONS:  'activity:icons',
+  HIDE_APP:            'activity:hideApp',
+  UNHIDE_APP:          'activity:unhideApp',
 } as const
 
 export type IpcKey = typeof IPC[keyof typeof IPC]
@@ -32,6 +36,7 @@ export interface BlockedApp {
 
 export interface AppSettings {
   blockedApps: BlockedApp[]
+  hiddenApps: string[]       // app names hidden from activity tracking
   minWordCount: number
   countdownDelay: number   // seconds
   focusHoursEnabled: boolean
@@ -45,6 +50,7 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   blockedApps: [],
+  hiddenApps: [],
   minWordCount: 10,
   countdownDelay: 10,
   focusHoursEnabled: false,
@@ -90,4 +96,19 @@ export interface StatsData {
   topApps: { name: string; count: number }[]
   hourlyActivity: { hour: number; count: number }[]
   dailyInterceptions: { date: string; count: number }[]
+}
+
+export interface AppUsageSummary {
+  app_name: string
+  total_seconds: number
+}
+
+export interface DailyUsage {
+  date: string
+  total_seconds: number
+}
+
+export interface ActivityData {
+  apps: AppUsageSummary[]
+  dailyUsage: DailyUsage[]
 }

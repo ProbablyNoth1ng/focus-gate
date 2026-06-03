@@ -6,6 +6,8 @@ import { IPC, AppSettings, DEFAULT_SETTINGS } from '../shared/ipc-types'
 import {
   getLogs,
   getStats,
+  getActivityData,
+  getAppIcons,
   clearLogs,
   clearActivity,
   clearAll,
@@ -83,6 +85,7 @@ export function registerIpcHandlers(
 
   ipcMain.handle(IPC.CLEAR_ACTIVITY, () => {
     clearActivity()
+    store.set('hiddenApps', [])
     return { success: true }
   })
 
@@ -94,6 +97,30 @@ export function registerIpcHandlers(
   // ── Stats ─────────────────────────────────────────────────
   ipcMain.handle(IPC.GET_STATS, () => {
     return getStats()
+  })
+
+  // ── Activity ──────────────────────────────────────────────
+  ipcMain.handle(IPC.GET_ACTIVITY, () => {
+    const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
+    return getActivityData(settings.hiddenApps ?? [])
+  })
+
+  ipcMain.handle(IPC.GET_ACTIVITY_ICONS, async (_event, appNames: string[]) => {
+    return getAppIcons(appNames)
+  })
+
+  ipcMain.handle(IPC.HIDE_APP, (_event, appName: string) => {
+    const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
+    const hidden = [...(settings.hiddenApps ?? []), appName]
+    store.set('hiddenApps', hidden)
+    return hidden
+  })
+
+  ipcMain.handle(IPC.UNHIDE_APP, (_event, appName: string) => {
+    const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
+    const hidden = (settings.hiddenApps ?? []).filter(h => h !== appName)
+    store.set('hiddenApps', hidden)
+    return hidden
   })
 
   // ── Export ────────────────────────────────────────────────

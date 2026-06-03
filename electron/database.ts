@@ -1,5 +1,6 @@
 import path from 'path'
 import fs from 'fs'
+import { exec } from 'child_process'
 import { app } from 'electron'
 import initSqlJs, { Database, SqlJsStatic } from 'sql.js'
 import type { IntentionLog, StatsData } from '../shared/ipc-types'
@@ -71,10 +72,24 @@ export async function initDatabase(): Promise<void> {
       outcome     TEXT    NOT NULL CHECK(outcome IN ('completed', 'dismissed'))
     );
 
+    CREATE TABLE IF NOT EXISTS app_usage (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      app_name    TEXT    NOT NULL,
+      date        TEXT    NOT NULL,
+      seconds     INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(app_name, date)
+    );
+
+    CREATE TABLE IF NOT EXISTS daily_screen_time (
+      date TEXT PRIMARY KEY,
+      seconds INTEGER NOT NULL DEFAULT 0
+    );
+
     CREATE INDEX IF NOT EXISTS idx_activity_timestamp   ON app_activity(timestamp);
     CREATE INDEX IF NOT EXISTS idx_activity_name        ON app_activity(app_name);
     CREATE INDEX IF NOT EXISTS idx_logs_timestamp       ON intention_logs(timestamp);
     CREATE INDEX IF NOT EXISTS idx_results_timestamp    ON interception_results(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_app_usage_date       ON app_usage(date);
   `)
 
   console.log('[DB] Initialized at', dbPath)
@@ -247,15 +262,242 @@ export function clearLogs(): void {
 }
 
 export function clearActivity(): void {
+  if (!db) return
   db.run('DELETE FROM app_activity')
+  db.run('DELETE FROM app_usage')
+  db.run('DELETE FROM daily_screen_time')
   persist()
 }
 
 export function clearAll(): void {
+  if (!db) return
   db.run('DELETE FROM intention_logs')
   db.run('DELETE FROM app_activity')
   db.run('DELETE FROM interception_results')
+  db.run('DELETE FROM app_usage')
+  db.run('DELETE FROM daily_screen_time')
   persist()
+}
+
+// ── App Usage (Activity tracking) ───────────────────────────────────────────
+// In-memory accumulator: app_name → seconds accumulated this flush cycle
+const usageAccumulator = new Map<string, number>()
+const USAGE_FLUSH_INTERVAL = 5 * 60 * 1000 // 5 minutes
+let usageFlushTimer: ReturnType<typeof setInterval> | null = null
+
+export function startUsageFlushTimer(): void {
+  if (usageFlushTimer) return
+  usageFlushTimer = setInterval(() => flushUsage(), USAGE_FLUSH_INTERVAL)
+}
+
+export function stopUsageFlushTimer(): void {
+  flushUsage() // final flush
+  if (usageFlushTimer) {
+    clearInterval(usageFlushTimer)
+    usageFlushTimer = null
+  }
+}
+
+let lastAccumulationTime = 0
+
+export function accumulateUsage(appName: string): void {
+  const now = Date.now()
+  // Rate limit: only accumulate once per 60 seconds globally
+  // This prevents inflated totals when multiple processes start in the same minute
+  if (now - lastAccumulationTime < 60_000) return
+  lastAccumulationTime = now
+
+  const key = appName.toLowerCase()
+
+  // Track actual daily screen time (1 minute of real usage per tick)
+  const today = new Date().toISOString().slice(0, 10)
+  db.run(
+    `INSERT INTO daily_screen_time (date, seconds) VALUES (?, 60)
+     ON CONFLICT(date) DO UPDATE SET seconds = seconds + 60`,
+    [today]
+  )
+
+  // Also write directly to app_usage so the Activity list shows apps immediately
+  // (not waiting for the 5-minute flush cycle)
+  db.run(
+    `INSERT INTO app_usage (app_name, date, seconds) VALUES (?, ?, 60)
+     ON CONFLICT(app_name, date) DO UPDATE SET seconds = seconds + 60`,
+    [key, today]
+  )
+
+  // Still track in the accumulator for the periodic persist() call
+  usageAccumulator.set(key, (usageAccumulator.get(key) ?? 0) + 60)
+}
+
+function flushUsage(): void {
+  if (!db || usageAccumulator.size === 0) return
+  const today = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+
+  for (const [appName, seconds] of usageAccumulator) {
+    db.run(
+      `INSERT INTO app_usage (app_name, date, seconds) VALUES (?, ?, ?)
+       ON CONFLICT(app_name, date) DO UPDATE SET seconds = seconds + excluded.seconds`,
+      [appName, today, seconds]
+    )
+  }
+  usageAccumulator.clear()
+  persist()
+}
+
+export function getActivityData(hiddenApps: string[] = []): { apps: { app_name: string; total_seconds: number }[]; dailyUsage: { date: string; total_seconds: number }[] } {
+  if (!db) return { apps: [], dailyUsage: [] }
+
+  const now = new Date()
+  now.setHours(0, 0, 0, 0)
+  now.setDate(now.getDate() - 30)
+  const thirtyDaysAgo = now.toISOString().slice(0, 10)
+
+  // Build a normalized set of hidden app names for filtering
+  const hiddenSet = new Set(hiddenApps.map(h => h.toLowerCase().replace(/\.exe$/i, '')))
+
+  const allApps = queryAll<{ app_name: string; total_seconds: number }>(
+    `SELECT REPLACE(app_name, '.exe', '') as app_name, SUM(seconds) as total_seconds
+     FROM app_usage
+     WHERE date >= ?
+     GROUP BY REPLACE(app_name, '.exe', '')
+     ORDER BY total_seconds DESC`,
+    [thirtyDaysAgo]
+  )
+
+  // Filter out hidden apps
+  const apps = allApps.filter(a => !hiddenSet.has(a.app_name.toLowerCase()))
+
+  const dailyUsage = queryAll<{ date: string; total_seconds: number }>(
+    `SELECT date, seconds as total_seconds
+     FROM daily_screen_time
+     WHERE date >= ?
+     ORDER BY date`,
+    [thirtyDaysAgo]
+  )
+
+  return { apps, dailyUsage }
+}
+
+// ── Icon lookup cache ────────────────────────────────────────────────────────
+const iconCache = new Map<string, string>() // app_name → data URL
+
+// Common install paths for apps that may not be running when icon is requested
+const COMMON_EXE_PATHS: Record<string, string[]> = {
+  git: [
+    'C:\\Program Files\\Git\\cmd\\git.exe',
+    'C:\\Program Files (x86)\\Git\\cmd\\git.exe',
+  ],
+  postgres: [
+    'C:\\Program Files\\PostgreSQL\\17\\bin\\postgres.exe',
+    'C:\\Program Files\\PostgreSQL\\16\\bin\\postgres.exe',
+    'C:\\Program Files\\PostgreSQL\\15\\bin\\postgres.exe',
+    'C:\\Program Files\\PostgreSQL\\14\\bin\\postgres.exe',
+  ],
+  psql: [
+    'C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe',
+    'C:\\Program Files\\PostgreSQL\\16\\bin\\psql.exe',
+    'C:\\Program Files\\PostgreSQL\\15\\bin\\psql.exe',
+    'C:\\Program Files\\PostgreSQL\\14\\bin\\psql.exe',
+  ],
+  code: [
+    'C:\\Users\\' + (process.env.USERNAME) + '\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe',
+  ],
+  chrome: [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  ],
+  firefox: [
+    'C:\\Program Files\\Mozilla Firefox\\firefox.exe',
+    'C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe',
+  ],
+  node: [
+    'C:\\Program Files\\nodejs\\node.exe',
+  ],
+}
+
+async function tryGetIconFromPath(exePath: string): Promise<string> {
+  try {
+    const icon = await app.getFileIcon(exePath, { size: 'normal' })
+    const dataUrl = icon.toDataURL()
+    return dataUrl
+  } catch {
+    return ''
+  }
+}
+
+export async function getAppIcon(appName: string): Promise<string> {
+  const key = appName.toLowerCase().replace(/\.exe$/i, '')
+  if (iconCache.has(key)) return iconCache.get(key)!
+
+  return new Promise((resolve) => {
+    // Step 1: Try Get-Process to find running process path
+    const cmd = `powershell -NoProfile -Command "try { $p = Get-Process -Name '${key}' -ErrorAction Stop | Where-Object { $_.Path } | Select-Object -First 1 -ExpandProperty Path; if($p){ $p } else { '' } } catch { '' }"`
+    exec(cmd, { timeout: 5000 }, async (err, stdout) => {
+      const exePath = stdout?.trim()
+      if (exePath && exePath !== '' && !err) {
+        try {
+          const icon = await app.getFileIcon(exePath, { size: 'normal' })
+          const dataUrl = icon.toDataURL()
+          iconCache.set(key, dataUrl)
+          resolve(dataUrl)
+          return
+        } catch { /* fall through to fallback */ }
+      }
+
+      // Step 2: Try common install paths
+      const commonPaths = COMMON_EXE_PATHS[key]
+      if (commonPaths) {
+        for (const p of commonPaths) {
+          if (fs.existsSync(p)) {
+            try {
+              const icon = await app.getFileIcon(p, { size: 'normal' })
+              const dataUrl = icon.toDataURL()
+              if (dataUrl && dataUrl !== 'data:;base64,') {
+                iconCache.set(key, dataUrl)
+                resolve(dataUrl)
+                return
+              }
+            } catch { /* try next path */ }
+          }
+        }
+      }
+
+      // Step 3: Try where.exe to locate the executable
+      const whereCmd = `where.exe ${key} 2>nul`
+      exec(whereCmd, { timeout: 3000 }, async (_whereErr, whereStdout) => {
+        const wherePath = whereStdout?.trim().split('\n')[0]?.trim()
+        if (wherePath && wherePath !== '' && fs.existsSync(wherePath)) {
+          try {
+            const icon = await app.getFileIcon(wherePath, { size: 'normal' })
+            const dataUrl = icon.toDataURL()
+            if (dataUrl && dataUrl !== 'data:;base64,') {
+              iconCache.set(key, dataUrl)
+              resolve(dataUrl)
+              return
+            }
+          } catch { /* fall through */ }
+        }
+
+        iconCache.set(key, '')
+        resolve('')
+      })
+    })
+  })
+}
+
+export async function getAppIcons(appNames: string[]): Promise<Record<string, string>> {
+  const result: Record<string, string> = {}
+  const uniqueNames = [...new Set(appNames.map(n => n.toLowerCase().replace(/\.exe$/i, '')))]
+
+  const batchSize = 5
+  for (let i = 0; i < uniqueNames.length; i += batchSize) {
+    const batch = uniqueNames.slice(i, i + batchSize)
+    const icons = await Promise.all(batch.map(name => getAppIcon(name)))
+    batch.forEach((name, idx) => {
+      result[name] = icons[idx]
+    })
+  }
+  return result
 }
 
 export function exportCsv(): string {

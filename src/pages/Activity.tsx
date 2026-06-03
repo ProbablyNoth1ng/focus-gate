@@ -1,0 +1,194 @@
+import { useState, useEffect } from 'react'
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
+import type { ActivityData } from '../../shared/ipc-types'
+
+function formatDuration(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  if (hours > 0) return `${hours}h ${minutes}m`
+  return `${minutes}m`
+}
+
+function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={{
+      background: 'var(--bg-surface)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--radius-lg)',
+      padding: '16px 20px 8px',
+    }}>
+      <h3 style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 16, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+        {title}
+      </h3>
+      {children}
+    </div>
+  )
+}
+
+const TOOLTIP_STYLE = {
+  background: 'var(--bg-elevated)',
+  border: '1px solid var(--border-strong)',
+  borderRadius: 6,
+  fontSize: 12,
+  color: 'var(--text-primary)',
+}
+
+export function Activity() {
+  const [data, setData] = useState<ActivityData | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [icons, setIcons] = useState<Record<string, string>>({})
+  const [hoveredRow, setHoveredRow] = useState<string | null>(null)
+
+  const loadData = () => {
+    window.electronAPI.getActivity().then(d => {
+      setData(d)
+      setLoading(false)
+      // Fetch icons for all apps
+      if (d.apps.length > 0) {
+        window.electronAPI.getActivityIcons(d.apps.map(a => a.app_name.replace(/\.exe$/i, ''))).then(setIcons)
+      }
+    })
+  }
+
+  useEffect(() => {
+    loadData()
+    const interval = setInterval(loadData, 15_000) // refresh every 15s
+    return () => clearInterval(interval)
+  }, [])
+
+  const handleHideApp = async (appName: string) => {
+    await window.electronAPI.hideApp(appName)
+    loadData()
+  }
+
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)' }}>
+        Loading activity…
+      </div>
+    )
+  }
+
+  if (!data || (data.apps.length === 0 && data.dailyUsage.length === 0)) {
+    return (
+      <div style={{ textAlign: 'center', padding: 60, color: 'var(--text-muted)' }}>
+        <div style={{ fontSize: 36, marginBottom: 12 }}>📊</div>
+        No activity data yet
+      </div>
+    )
+  }
+
+  const sortedApps = [...data.apps].sort((a, b) => b.total_seconds - a.total_seconds)
+
+  return (
+    <div style={{ overflowY: 'auto', height: '100%', padding: '4px 24px 24px' }}>
+      {/* Title */}
+      <h2 style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 16, textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'center' }}>
+        APP USAGE (LAST 30 DAYS)
+      </h2>
+
+      {/* App count */}
+      <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>
+        {sortedApps.length} {sortedApps.length === 1 ? 'app' : 'apps'} tracked
+      </div>
+
+      {/* Scrollable app list */}
+      <div style={{
+        maxHeight: 'calc(100vh - 340px)',
+        overflowY: 'auto',
+        background: 'var(--bg-surface)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-lg)',
+        marginBottom: 20,
+      }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)', width: 44 }}></th>
+              <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border)' }}>APP</th>
+              <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border)' }}>TIME SPENT</th>
+              <th style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)', width: 36 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedApps.map((app) => {
+              const cleanName = app.app_name.replace(/\.exe$/i, '')
+              return (
+                <tr
+                  key={app.app_name}
+                  onMouseEnter={() => setHoveredRow(app.app_name)}
+                  onMouseLeave={() => setHoveredRow(null)}
+                  style={{ position: 'relative' }}
+                >
+                  {/* Icon cell */}
+                  <td style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)', width: 44 }}>
+                    {icons[cleanName] ? (
+                      <img src={icons[cleanName]} alt="" style={{ width: 22, height: 22, borderRadius: 4 }} />
+                    ) : (
+                      <div style={{ width: 22, height: 22, borderRadius: 4, background: 'var(--bg-active)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)' }}>
+                        {cleanName.charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                  </td>
+                  {/* App name */}
+                  <td style={{ padding: '10px 12px', fontSize: 13, fontWeight: 500, textAlign: 'left', borderBottom: '1px solid var(--border)' }}>
+                    {cleanName}
+                  </td>
+                  {/* Time spent */}
+                  <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--accent-bright)', borderBottom: '1px solid var(--border)' }}>
+                    {formatDuration(app.total_seconds)}
+                  </td>
+                  {/* Hide button - only visible on hover */}
+                  <td style={{ padding: '10px 8px', borderBottom: '1px solid var(--border)', width: 36, textAlign: 'center' }}>
+                    {hoveredRow === app.app_name && (
+                      <button
+                        onClick={() => handleHideApp(app.app_name)}
+                        title="Hide from tracking"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          padding: 4,
+                          borderRadius: 4,
+                          color: 'var(--text-muted)',
+                          fontSize: 14,
+                          lineHeight: 1,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          transition: 'color 0.15s',
+                        }}
+                        onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--danger)')}
+                        onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Bar chart */}
+      <ChartCard title="DAILY USAGE (LAST 30 DAYS)">
+        <ResponsiveContainer width="100%" height={200}>
+          <BarChart data={data.dailyUsage} margin={{ left: -8, right: 8, top: 4, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+            <XAxis dataKey="date" tick={{ fill: 'var(--text-muted)', fontSize: 10 }} tickFormatter={d => d?.slice(5)} />
+            <YAxis
+              tick={{ fill: 'var(--text-muted)', fontSize: 10 }}
+              allowDecimals={false}
+              domain={[0, (dataMax: number) => Math.max(Math.ceil(dataMax / 3600), 1) * 3600]}
+              tickFormatter={(v: number) => `${Math.round(v / 3600)}h`}
+            />
+            <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number) => formatDuration(v)} />
+            <Bar dataKey="total_seconds" fill="var(--accent)" radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </ChartCard>
+    </div>
+  )
+}

@@ -7,6 +7,7 @@ let currentScriptPath = ''
 let currentCallback: ((pid: number, name: string) => void) | null = null
 
 const SYSTEM_NOISE = new Set([
+  // ── Core Windows System ────────────────────────────────────────
   'svchost.exe', 'conhost.exe', 'runtimebroker.exe',
   'taskhostw.exe', 'searchindexer.exe', 'wmiprvse.exe',
   'fontdrvhost.exe', 'dwm.exe', 'csrss.exe', 'lsass.exe',
@@ -15,10 +16,100 @@ const SYSTEM_NOISE = new Set([
   'audiodg.exe', 'msdtc.exe', 'tasklist.exe', 'cmd.exe',
   'powershell.exe', 'wsl.exe', 'wslhost.exe', 'registry',
   'system', 'system idle process', 'secure system', 'memory compression',
+  'svchost', 'csrss', 'lsass', 'smss', 'wininit', 'services',
+  'winlogon', 'dwm', 'sihost', 'ctfmon', 'fontdrvhost',
+
+  // ── Windows Shell & UI ─────────────────────────────────────────
+  'explorer.exe', 'shellexperiencehost.exe', 'startmenuexperiencehost.exe',
+  'searchapp.exe', 'searchprotocolhost.exe', 'searchfilterhost.exe',
+  'textinputhost.exe', 'lockapp.exe', 'logonui.exe', 'logon.scr',
+  'ui0detect.exe', 'dismhost.exe', 'musnotification.exe',
+  'musnotifyicon.exe', 'tmui.exe', 'shellhost.exe',
+  'backgroundtaskhost.exe', 'openwith.exe',
+
+  // ── Windows Update & Servicing ─────────────────────────────────
+  'wuauclt.exe', 'usoclient.exe', 'wuapp.exe', 'trustedinstaller.exe',
+  'tiworker.exe', 'tiworker', 'trustedinstaller',
+  'msiexec.exe', 'mersetup.exe', 'wermgr.exe', 'werfault.exe',
+  'musnotification', 'musnotifyicon',
+
+  // ── Windows Security & Defender ────────────────────────────────
+  'smartscreen.exe', 'smartscreen',
+  'senseir.exe', 'sensecnc.exe', 'sensespot.exe',
+  'mpcmdrun.exe', 'msmpeng.exe',
+  'securityhealthservice.exe', 'securityhealthsystray.exe',
+  'nis.exe',
+
+  // ── Windows Licensing & Activation ─────────────────────────────
+  'sppsvc.exe', 'sppsvc', 'sppextcomobj.exe', 'sppextcomobj',
+  'slui.exe', 'slui', 'sppnotification.exe',
+  'osppsvc.exe', 'sppuinotify.exe',
+
+  // ── Windows Store & AppX ───────────────────────────────────────
+  'phoneexperiencehost.exe', 'phoneexperiencehost',
+  'gamingservices.exe', 'gamingservices',
+  'xboxapp.exe', 'xboxgipservice.exe', 'xboxgip.exe',
+  'store.exe', 'wshelper.exe', 'installmanagerapp.exe', 'installmanagerapp',
+  'sdxhelper.exe', 'sdxhelper',
+
+  // ── Windows Search & Indexing ──────────────────────────────────
+  'searchindexer', 'searchprotocolhost', 'searchfilterhost',
+  'searchapp', 'SearchHost.exe', 'SearchUI.exe',
+
+  // ── Windows Input & Accessibility ──────────────────────────────
+  'chsihost.exe', 'chsihost',
+
+  // ── Developer tools & runtime processes ────────────────────────
+  'node.exe', 'npm.exe', 'npx.exe', 'yarn.exe', 'pnpm.exe',
+  'python.exe', 'python3.exe', 'pip.exe', 'pip3.exe',
+  'java.exe', 'javaw.exe',
+  'go.exe',
+  'rustc.exe', 'cargo.exe',
+  'dotnet.exe', 'devenv.exe',
+  'git.exe', 'git-bash.exe', 'git',
+
+  // ── Electron & dev servers ─────────────────────────────────────
+  'electron.exe', 'vite.exe', 'webpack.exe', 'esbuild.exe',
+  'tsc.exe', 'ts-node.exe',
+
+  // ── Office & OneDrive background ───────────────────────────────
+  'officec2rclient.exe', 'officec2rclient',
+  'officeclicktorun.exe', 'integrator.exe',
+  'onedrive.exe', 'onedriveupdater.exe',
+  'groove.exe', 'msosync.exe',
+
+  // ── Package managers & build tools ─────────────────────────────
+  'make.exe', 'cmake.exe', 'ninja.exe',
+  'msbuild.exe', 'csc.exe', 'vbc.exe',
+
+  // ── Remote Desktop ─────────────────────────────────────────────
+  'msrdc.exe', 'msrdc', 'mstsc.exe',
+
+  // ── Misc system tools ──────────────────────────────────────────
+  'updater.exe', 'updater',
+  'where.exe', 'where',
+  'wmic.exe', 'wmic',
+  'cleanmgr.exe', 'dfrgui.exe', 'diskmgmt.msc',
+  'resmon.exe', 'perfmon.exe', 'msconfig.exe',
+  'regedit.exe', 'regedt32.exe',
+  'rundll32.exe', 'rundll32',
+  'dllhost',
+  'runtimebroker',
+  'conhost',
+  'taskhostw',
+  'ctfmon',
+
+  // ── FocusGate (don't track ourselves) ──────────────────────────
+  'focusgate.exe',
+  'focusgate-dev.exe',
 ])
 
 export function isSystemProcess(name: string): boolean {
-  return SYSTEM_NOISE.has(name.toLowerCase())
+  const lower = name.toLowerCase()
+  // Check with and without .exe suffix
+  if (SYSTEM_NOISE.has(lower)) return true
+  if (!lower.endsWith('.exe') && SYSTEM_NOISE.has(lower + '.exe')) return true
+  return false
 }
 
 // Dedup guard — 500ms TTL
@@ -97,7 +188,11 @@ export function startWmiWatcher(
       if (!trimmed) continue
       const [pidStr, name] = trimmed.split('|')
       const pid = parseInt(pidStr, 10)
-      if (!isNaN(pid) && name) onProcess(pid, name.trim())
+      if (!isNaN(pid) && name) {
+        // Strip .exe suffix for cleaner app names
+        const cleanName = name.trim().replace(/\.exe$/i, '')
+        onProcess(pid, cleanName)
+      }
     }
   })
 

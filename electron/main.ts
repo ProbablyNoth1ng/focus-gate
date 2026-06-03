@@ -7,7 +7,7 @@ import path from 'path'
 import { exec } from 'child_process'
 import Store from 'electron-store'
 import { AppSettings, DEFAULT_SETTINGS, IPC, InterceptionPayload } from '../shared/ipc-types'
-import { initDatabase, logActivity, logInterceptionResult } from './database'
+import { initDatabase, logActivity, logInterceptionResult, accumulateUsage, startUsageFlushTimer, stopUsageFlushTimer } from './database'
 import {
   startWmiWatcher,
   stopWmiWatcher,
@@ -247,6 +247,7 @@ function registerModalIpc(): void {
 app.whenReady().then(async () => {
   try {
     await initDatabase()
+    startUsageFlushTimer()
   } catch (err) {
     console.error('[DB] Failed to initialize database:', err)
   }
@@ -297,7 +298,9 @@ app.whenReady().then(async () => {
     // Blocked apps are counted via interception_results (completed/dismissed),
     // which gives accurate 1-per-open counts without multi-process spam.
     if (!isBlocked) {
-      logActivity(name, false)
+      const cleanName = name.replace(/\.exe$/i, '')
+      logActivity(cleanName, false)
+      accumulateUsage(cleanName)
     }
 
     // Skip PIDs that were already running when the rule was added
@@ -363,6 +366,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  stopUsageFlushTimer()
   destroyTray()
   stopWmiWatcher()
   stopFallbackWatchdog()

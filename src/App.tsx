@@ -4,11 +4,12 @@ import { DEFAULT_SETTINGS } from '../shared/ipc-types'
 import { Settings } from './pages/Settings'
 import { History } from './pages/History'
 import { Stats } from './pages/Stats'
+import { Activity } from './pages/Activity'
 import { IntentionModal } from './components/IntentionModal'
 import { ToastContainer } from './components/Toast'
 import './styles/global.css'
 
-type Tab = 'settings' | 'history' | 'stats'
+type Tab = 'settings' | 'history' | 'stats' | 'activity'
 
 const isModal = new URLSearchParams(window.location.search).get('modal') === 'true'
 
@@ -232,7 +233,7 @@ export default function App() {
         borderBottom: '1px solid var(--border)',
         flexShrink: 0,
       }}>
-        {(['settings', 'history', 'stats'] as Tab[]).map(tab => (
+        {(['settings', 'history', 'stats', 'activity'] as Tab[]).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -255,7 +256,7 @@ export default function App() {
               if (activeTab !== tab) (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-muted)'
             }}
           >
-            {tab === 'settings' ? '⚙ Settings' : tab === 'history' ? '📋 History' : '📊 Stats'}
+            {tab === 'settings' ? '⚙ Settings' : tab === 'history' ? '📋 History' : tab === 'stats' ? '📊 Stats' : '⏱ Activity'}
           </button>
         ))}
       </div> 
@@ -265,6 +266,7 @@ export default function App() {
         )}
         {activeTab === 'history' && <History />}
         {activeTab === 'stats' && <Stats />}
+        {activeTab === 'activity' && <Activity />}
       </div>
 
       <ToastContainer />

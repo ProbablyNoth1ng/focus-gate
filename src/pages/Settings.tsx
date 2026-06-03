@@ -55,6 +55,8 @@ const DEBOUNCE_MS = 500
 
 export function Settings({ settings, onSave }: SettingsProps) {
 
+  const [hiddenApps, setHiddenApps] = useState<string[]>(settings.hiddenApps ?? [])
+
   const [minWordCount, setMinWordCount] = useState(settings.minWordCount)
   const [countdownDelay, setCountdownDelay] = useState(settings.countdownDelay)
   const [focusStart, setFocusStart] = useState(settings.focusStart)
@@ -63,6 +65,7 @@ export function Settings({ settings, onSave }: SettingsProps) {
   const [localDarkMode, setLocalDarkMode] = useState(settings.darkMode)
   const [localFocusHoursEnabled, setLocalFocusHoursEnabled] = useState(settings.focusHoursEnabled)
 
+  useEffect(() => { setHiddenApps(settings.hiddenApps ?? []) }, [settings.hiddenApps])
   useEffect(() => { setMinWordCount(settings.minWordCount) }, [settings.minWordCount])
   useEffect(() => { setCountdownDelay(settings.countdownDelay) }, [settings.countdownDelay])
   useEffect(() => { setFocusStart(settings.focusStart) }, [settings.focusStart])
@@ -124,6 +127,7 @@ export function Settings({ settings, onSave }: SettingsProps) {
   const handleClearActivity = async () => {
     if (!confirm('Clear all app activity stats? This cannot be undone.')) return
     await window.electronAPI.clearActivity()
+    setHiddenApps([])
     showToast('Activity stats cleared')
   }
 
@@ -131,6 +135,13 @@ export function Settings({ settings, onSave }: SettingsProps) {
     if (!confirm('Clear ALL data (activity stats + intention logs)? This cannot be undone.')) return
     await window.electronAPI.clearAll()
     showToast('All data cleared')
+  }
+
+  const handleUnhideApp = async (appName: string) => {
+    await window.electronAPI.unhideApp(appName)
+    const updated = hiddenApps.filter(h => h !== appName)
+    setHiddenApps(updated)
+    showToast(`"${appName}" restored to tracking`)
   }
 
   const handleExport = async () => {
@@ -306,6 +317,53 @@ export function Settings({ settings, onSave }: SettingsProps) {
             {settings.isPaused ? '⏸ Paused' : '● Active'}
           </div>
         </FieldRow>
+      </Section>
+
+      <Section>
+        <SectionHeader
+          title="Hidden from Tracking"
+          subtitle="Apps removed from activity tracking. Click restore to bring them back."
+        />
+        {hiddenApps.length === 0 ? (
+          <div style={{
+            textAlign: 'center',
+            padding: '20px 0',
+            color: 'var(--text-muted)',
+            fontSize: 13,
+          }}>
+            Nothing hidden yet
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {hiddenApps.map(name => (
+              <div key={name} style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '8px 12px',
+                background: 'var(--bg-elevated)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-sm)',
+              }}>
+                <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>{name}</span>
+                <button
+                  onClick={() => handleUnhideApp(name)}
+                  style={{
+                    padding: '4px 10px',
+                    background: 'var(--bg-active)',
+                    color: 'var(--text-secondary)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Restore
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </Section>
 
       <Section>

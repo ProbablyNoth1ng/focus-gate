@@ -18,6 +18,10 @@ const IPC = {
   PAUSE_TOGGLE:       'pause:toggle',
   PAUSE_TIMED:        'pause:timed',
   GET_PAUSE_STATE:    'pause:getState',
+  GET_ACTIVITY:       'activity:get',
+  GET_ACTIVITY_ICONS: 'activity:icons',
+  HIDE_APP:           'activity:hideApp',
+  UNHIDE_APP:         'activity:unhideApp',
 } as const
 
  
@@ -26,6 +30,7 @@ import type {
   InterceptionPayload,
   IntentionLog,
   StatsData,
+  ActivityData,
 } from '../shared/ipc-types'
 
  
@@ -91,6 +96,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getPauseState: (): Promise<{ isPaused: boolean; pauseUntil: number | null }> =>
     ipcRenderer.invoke(IPC.GET_PAUSE_STATE),
+
+  getActivity: (): Promise<ActivityData> =>
+    ipcRenderer.invoke(IPC.GET_ACTIVITY),
+
+  getActivityIcons: (appNames: string[]): Promise<Record<string, string>> =>
+    ipcRenderer.invoke(IPC.GET_ACTIVITY_ICONS, appNames),
+
+  hideApp: (appName: string): Promise<string[]> =>
+    ipcRenderer.invoke(IPC.HIDE_APP, appName),
+
+  unhideApp: (appName: string): Promise<string[]> =>
+    ipcRenderer.invoke(IPC.UNHIDE_APP, appName),
 
    onInterceptionStart: (cb: (payload: InterceptionPayload) => void): (() => void) => {
     const handler = (_: Electron.IpcRendererEvent, payload: InterceptionPayload) => cb(payload)
