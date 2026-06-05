@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { IoCheckmark } from 'react-icons/io5'
 
 interface CountdownRingProps {
   duration: number       // seconds
@@ -86,7 +87,7 @@ export function CountdownRing({ duration, onComplete, size = 160, strokeWidth = 
         gap: 2,
       }}>
         {done ? (
-          <span style={{ fontSize: 28, color: 'var(--success)' }}>✓</span>
+          <span style={{ fontSize: 28, color: 'var(--success)' }}><IoCheckmark /></span>
         ) : (
           <>
             <span style={{

@@ -280,43 +280,25 @@ export function clearAll(): void {
 }
 
 // ── App Usage (Activity tracking) ───────────────────────────────────────────
-// In-memory accumulator: app_name → seconds accumulated this flush cycle
-const usageAccumulator = new Map<string, number>()
-const USAGE_FLUSH_INTERVAL = 5 * 60 * 1000 // 5 minutes
-let usageFlushTimer: ReturnType<typeof setInterval> | null = null
+const lastAccumulationByApp = new Map<string, number>()
 
-export function startUsageFlushTimer(): void {
-  if (usageFlushTimer) return
-  usageFlushTimer = setInterval(() => flushUsage(), USAGE_FLUSH_INTERVAL)
-}
-
-export function stopUsageFlushTimer(): void {
-  flushUsage() // final flush
-  if (usageFlushTimer) {
-    clearInterval(usageFlushTimer)
-    usageFlushTimer = null
-  }
-}
-
-let lastAccumulationTime = 0
+/** Set to true whenever any app is accumulated; reset by tickDailyScreenTime(). */
+let anyAppActive = false
 
 export function accumulateUsage(appName: string): void {
   const now = Date.now()
-  // Rate limit: only accumulate once per 60 seconds globally
-  // This prevents inflated totals when multiple processes start in the same minute
-  if (now - lastAccumulationTime < 60_000) return
-  lastAccumulationTime = now
-
   const key = appName.toLowerCase()
+  const lastTime = lastAccumulationByApp.get(key) || 0
+  // Use 55s dedup so periodic 60s timer ticks are never dropped due to drift
+  if (now - lastTime < 55_000) return
+  lastAccumulationByApp.set(key, now)
 
-  // Track actual daily screen time (1 minute of real usage per tick)
-  const today = new Date().toISOString().slice(0, 10)
-  db.run(
-    `INSERT INTO daily_screen_time (date, seconds) VALUES (?, 60)
-     ON CONFLICT(date) DO UPDATE SET seconds = seconds + 60`,
-    [today]
-  )
+  // Signal that at least one app was active in this 60s window
+  anyAppActive = true
 
+  // Use local date (not UTC) so it matches the user's calendar day,
+  // consistent with tickDailyScreenTime().
+  const today = new Date().toLocaleDateString('en-CA')
   // Also write directly to app_usage so the Activity list shows apps immediately
   // (not waiting for the 5-minute flush cycle)
   db.run(
@@ -324,33 +306,51 @@ export function accumulateUsage(appName: string): void {
      ON CONFLICT(app_name, date) DO UPDATE SET seconds = seconds + 60`,
     [key, today]
   )
-
-  // Still track in the accumulator for the periodic persist() call
-  usageAccumulator.set(key, (usageAccumulator.get(key) ?? 0) + 60)
+persist()
 }
 
-function flushUsage(): void {
-  if (!db || usageAccumulator.size === 0) return
-  const today = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
 
-  for (const [appName, seconds] of usageAccumulator) {
-    db.run(
-      `INSERT INTO app_usage (app_name, date, seconds) VALUES (?, ?, ?)
-       ON CONFLICT(app_name, date) DO UPDATE SET seconds = seconds + excluded.seconds`,
-      [appName, today, seconds]
-    )
+// ─── Wall-clock daily screen time (independent of per-app accumulation) ──────
+// daily_screen_time tracks *wall-clock* minutes: at most +60 s per real minute
+// when at least one app was active.  This avoids inflating totals when N apps
+// are open concurrently.
+
+let dailyScreenTimeTimer: ReturnType<typeof setInterval> | null = null
+
+function tickDailyScreenTime(): void {
+  if (!anyAppActive) return          // idle — don't count
+  anyAppActive = false               // consume the flag
+
+  // Use local date (not UTC) so it matches the user's calendar day.
+  // toLocaleDateString('en-CA') yields YYYY-MM-DD in local time.
+  const today = new Date().toLocaleDateString('en-CA')
+  db.run(
+    `INSERT INTO daily_screen_time (date, seconds) VALUES (?, 60)
+     ON CONFLICT(date) DO UPDATE SET seconds = seconds + 60`,
+    [today]
+  )
+}
+
+export function startDailyScreenTimeTimer(): void {
+  if (dailyScreenTimeTimer) return
+  dailyScreenTimeTimer = setInterval(tickDailyScreenTime, 60_000)
+}
+
+export function stopDailyScreenTimeTimer(): void {
+  tickDailyScreenTime()              // final tick
+  if (dailyScreenTimeTimer) {
+    clearInterval(dailyScreenTimeTimer)
+    dailyScreenTimeTimer = null
   }
-  usageAccumulator.clear()
-  persist()
 }
+
 
 export function getActivityData(hiddenApps: string[] = []): { apps: { app_name: string; total_seconds: number }[]; dailyUsage: { date: string; total_seconds: number }[] } {
   if (!db) return { apps: [], dailyUsage: [] }
 
   const now = new Date()
-  now.setHours(0, 0, 0, 0)
-  now.setDate(now.getDate() - 30)
-  const thirtyDaysAgo = now.toISOString().slice(0, 10)
+  const thirtyDaysAgoDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30)
+  const thirtyDaysAgo = thirtyDaysAgoDate.toLocaleDateString('en-CA')
 
   // Build a normalized set of hidden app names for filtering
   const hiddenSet = new Set(hiddenApps.map(h => h.toLowerCase().replace(/\.exe$/i, '')))
@@ -359,6 +359,9 @@ export function getActivityData(hiddenApps: string[] = []): { apps: { app_name: 
     `SELECT REPLACE(app_name, '.exe', '') as app_name, SUM(seconds) as total_seconds
      FROM app_usage
      WHERE date >= ?
+       AND app_name NOT LIKE '%.tmp%'
+       AND app_name NOT LIKE '%.temp%'
+       AND app_name NOT LIKE '~%'
      GROUP BY REPLACE(app_name, '.exe', '')
      ORDER BY total_seconds DESC`,
     [thirtyDaysAgo]
@@ -507,4 +510,35 @@ export function exportCsv(): string {
     [r.id, r.timestamp, `"${r.app_name}"`, `"${r.exe_path}"`, `"${r.purpose.replace(/"/g, '""')}"`, r.word_count, r.resumed].join(',')
   ).join('\n')
   return header + body
+}
+
+export function getActivityForDate(date: string, hiddenApps: string[]): { app_name: string; total_seconds: number }[] {
+  if (!db) return []
+  const hidden = hiddenApps.map(h => h.toLowerCase())
+  const rows = queryAll<{ app_name: string; total_seconds: number }>(
+    `SELECT app_name, seconds as total_seconds
+     FROM app_usage
+     WHERE date = ? AND seconds > 0
+       AND app_name NOT LIKE '%.tmp%'
+       AND app_name NOT LIKE '%.temp%'
+       AND app_name NOT LIKE '~%'
+     ORDER BY seconds DESC`,
+    [date]
+  )
+  
+  return rows
+    .filter(r => !hidden.includes(r.app_name.toLowerCase()))
+    .map(r => ({
+      app_name: r.app_name.replace(/\.exe$/i, ''),
+      total_seconds: r.total_seconds
+    }))
+}
+
+export function hasActivityForDate(date: string): boolean {
+  if (!db) return false
+  const row = queryOne<{ '1': number }>(
+    `SELECT 1 FROM app_usage WHERE date = ? AND seconds > 0 LIMIT 1`,
+    [date]
+  )
+  return !!row
 }

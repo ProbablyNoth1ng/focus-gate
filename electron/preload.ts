@@ -22,6 +22,7 @@ const IPC = {
   GET_ACTIVITY_ICONS: 'activity:icons',
   HIDE_APP:           'activity:hideApp',
   UNHIDE_APP:         'activity:unhideApp',
+  GET_ACTIVITY_FOR_DATE: 'activity:getForDate',
 } as const
 
  
@@ -31,6 +32,7 @@ import type {
   IntentionLog,
   StatsData,
   ActivityData,
+  ActivityForDateResult,
 } from '../shared/ipc-types'
 
  
@@ -108,6 +110,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   unhideApp: (appName: string): Promise<string[]> =>
     ipcRenderer.invoke(IPC.UNHIDE_APP, appName),
+
+  getActivityForDate: (date: string): Promise<ActivityForDateResult> =>
+    ipcRenderer.invoke(IPC.GET_ACTIVITY_FOR_DATE, date),
 
    onInterceptionStart: (cb: (payload: InterceptionPayload) => void): (() => void) => {
     const handler = (_: Electron.IpcRendererEvent, payload: InterceptionPayload) => cb(payload)

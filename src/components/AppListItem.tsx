@@ -1,5 +1,6 @@
 import type { BlockedApp } from '../../shared/ipc-types'
 import { Toggle } from './Toggle'
+import { IoCubeOutline, IoClose } from 'react-icons/io5'
 
 interface AppListItemProps {
   app: BlockedApp
@@ -40,7 +41,7 @@ export function AppListItem({ app, onToggle, onRemove }: AppListItemProps) {
           justifyContent: 'center',
           fontSize: 14,
           flexShrink: 0,
-        }}>📦</div>
+        }}><IoCubeOutline style={{ fontSize: 16, color: 'var(--text-muted)' }} /></div>
       )}
 
       {/* Name + path */}
@@ -88,7 +89,7 @@ export function AppListItem({ app, onToggle, onRemove }: AppListItemProps) {
           ;(e.currentTarget as HTMLButtonElement).style.color = 'var(--text-muted)'
         }}
       >
-        ✕
+        <IoClose style={{ fontSize: 16 }} />
       </button>
     </div>
   )

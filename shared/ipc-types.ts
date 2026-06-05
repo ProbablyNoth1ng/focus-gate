@@ -22,6 +22,7 @@ export const IPC = {
   GET_ACTIVITY_ICONS:  'activity:icons',
   HIDE_APP:            'activity:hideApp',
   UNHIDE_APP:          'activity:unhideApp',
+  GET_ACTIVITY_FOR_DATE: 'activity:getForDate',
 } as const
 
 export type IpcKey = typeof IPC[keyof typeof IPC]
@@ -111,4 +112,12 @@ export interface DailyUsage {
 export interface ActivityData {
   apps: AppUsageSummary[]
   dailyUsage: DailyUsage[]
+}
+
+export interface ActivityForDateResult {
+  apps: { app_name: string; total_seconds: number }[]
+  hasPrevDay: boolean
+  hasNextDay: boolean
+  isToday: boolean
+  selectedDate: string
 }

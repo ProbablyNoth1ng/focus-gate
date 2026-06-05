@@ -7,13 +7,14 @@ import path from 'path'
 import { exec } from 'child_process'
 import Store from 'electron-store'
 import { AppSettings, DEFAULT_SETTINGS, IPC, InterceptionPayload } from '../shared/ipc-types'
-import { initDatabase, logActivity, logInterceptionResult, accumulateUsage, startUsageFlushTimer, stopUsageFlushTimer } from './database'
+import { initDatabase, logActivity, logInterceptionResult, accumulateUsage, startDailyScreenTimeTimer, stopDailyScreenTimeTimer } from './database'
 import {
   startWmiWatcher,
   stopWmiWatcher,
   startFallbackWatchdog,
   stopFallbackWatchdog,
   isSystemProcess,
+  isRealApp,
   shouldIntercept,
   excludeExistingPids,
   isPreExistingPid,
@@ -33,6 +34,55 @@ let modalWindow: BrowserWindow | null = null
 let intercepting = false          // prevents concurrent interceptions
 let startupGraceUntil = 0        // no interceptions during startup seeding
 let currentInterception: InterceptionPayload | null = null
+
+// ── Active-app PID tracking for periodic usage accumulation ─────────────────
+// Maps non-blocked app name → set of currently-live PIDs.
+// Every 60 s we check which PIDs are still alive and credit +60 s for each
+// app that still has at least one live PID.
+const activeAppPids = new Map<string, Set<number>>()
+let appUsageTimer: ReturnType<typeof setInterval> | null = null
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function tickAppUsage(): void {
+  for (const [appName, pids] of activeAppPids) {
+    // Prune dead PIDs
+    for (const pid of pids) {
+      if (!isProcessAlive(pid)) {
+        pids.delete(pid)
+      }
+    }
+
+    if (pids.size === 0) {
+      activeAppPids.delete(appName)
+    } else {
+      // App is still running — credit one minute of usage
+      accumulateUsage(appName)
+    }
+  }
+}
+
+function startAppUsageTimer(): void {
+  if (appUsageTimer) return
+  appUsageTimer = setInterval(tickAppUsage, 60_000)
+  console.log('[USAGE] Periodic app-usage timer started (60 s interval)')
+}
+
+function stopAppUsageTimer(): void {
+  if (appUsageTimer) {
+    tickAppUsage()               // final tick before shutdown
+    clearInterval(appUsageTimer)
+    appUsageTimer = null
+    console.log('[USAGE] Periodic app-usage timer stopped')
+  }
+}
 
 const isDev = !app.isPackaged
 
@@ -247,7 +297,8 @@ function registerModalIpc(): void {
 app.whenReady().then(async () => {
   try {
     await initDatabase()
-    startUsageFlushTimer()
+    startDailyScreenTimeTimer()
+    startAppUsageTimer()
   } catch (err) {
     console.error('[DB] Failed to initialize database:', err)
   }
@@ -285,6 +336,7 @@ app.whenReady().then(async () => {
 
   startWmiWatcher((pid, name) => {
     if (isSystemProcess(name)) return
+    if (!isRealApp(name)) return
 
     // wmiWatcher only fires for NEW pids — safe to remove from pre-existing set
     releasePreExistingPid(pid)
@@ -300,6 +352,14 @@ app.whenReady().then(async () => {
     if (!isBlocked) {
       const cleanName = name.replace(/\.exe$/i, '')
       logActivity(cleanName, false)
+
+      // Track PID so periodic tickAppUsage() can keep crediting time
+      if (!activeAppPids.has(cleanName)) {
+        activeAppPids.set(cleanName, new Set())
+      }
+      activeAppPids.get(cleanName)!.add(pid)
+
+      // Initial credit for the first minute
       accumulateUsage(cleanName)
     }
 
@@ -366,7 +426,8 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  stopUsageFlushTimer()
+  stopDailyScreenTimeTimer()
+  stopAppUsageTimer()
   destroyTray()
   stopWmiWatcher()
   stopFallbackWatchdog()

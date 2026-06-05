@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import type { InterceptionPayload, AppSettings } from '../../shared/ipc-types'
 import { CountdownRing } from './CountdownRing'
 import { WordCounter } from './WordCounter'
+import { IoCubeOutline } from 'react-icons/io5'
 
 interface IntentionModalProps {
   payload: InterceptionPayload
@@ -108,7 +109,7 @@ export function IntentionModal({ payload, settings }: IntentionModalProps) {
               margin: '0 auto 12px',
               border: '1px solid var(--border)',
             }}>
-              📦
+              <IoCubeOutline style={{ fontSize: 24, color: 'var(--text-muted)' }} />
             </div>
           )}
           <h1 style={{

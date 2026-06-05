@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { IoClose, IoCheckmark, IoInformationCircle } from 'react-icons/io5'
 
 export interface ToastMessage {
   id: number
@@ -73,7 +74,7 @@ export function ToastContainer() {
           <span style={{
             color: toast.type === 'error' ? 'var(--danger)' : toast.type === 'success' ? 'var(--success)' : 'var(--accent)',
           }}>
-            {toast.type === 'error' ? '✕' : toast.type === 'success' ? '✓' : 'ℹ'}
+            {toast.type === 'error' ? <IoClose style={{ fontSize: 14 }} /> : toast.type === 'success' ? <IoCheckmark style={{ fontSize: 14 }} /> : <IoInformationCircle style={{ fontSize: 14 }} />}
           </span>
           {toast.text}
         </div>

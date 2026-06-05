@@ -3,6 +3,7 @@ import type { AppSettings, BlockedApp } from '../../shared/ipc-types'
 import { AppListItem } from '../components/AppListItem'
 import { Toggle } from '../components/Toggle'
 import { showToast } from '../components/Toast'
+import { IoShieldCheckmarkOutline, IoPause, IoPlay, IoDownloadOutline, IoTrash } from 'react-icons/io5'
 
 interface SettingsProps {
   settings: AppSettings
@@ -183,7 +184,7 @@ export function Settings({ settings, onSave }: SettingsProps) {
             color: 'var(--text-muted)',
             fontSize: 13,
           }}>
-            <div style={{ fontSize: 28, marginBottom: 8 }}>🛡️</div>
+            <div style={{ fontSize: 28, marginBottom: 8, color: 'var(--text-muted)' }}><IoShieldCheckmarkOutline /></div>
             No apps blocked yet. Click "Add App" to get started.
           </div>
         ) : (
@@ -310,11 +311,14 @@ export function Settings({ settings, onSave }: SettingsProps) {
             borderRadius: 20,
             fontSize: 12,
             fontWeight: 500,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
             background: settings.isPaused ? 'rgba(245,166,35,0.15)' : 'var(--success-dim)',
             color: settings.isPaused ? 'var(--warning)' : 'var(--success)',
             border: `1px solid ${settings.isPaused ? 'rgba(245,166,35,0.3)' : 'rgba(78,203,141,0.3)'}`,
           }}>
-            {settings.isPaused ? '⏸ Paused' : '● Active'}
+            {settings.isPaused ? <><IoPause style={{ fontSize: 11 }} /> Paused</> : <><IoPlay style={{ fontSize: 9 }} /> Active</>}
           </div>
         </FieldRow>
       </Section>
@@ -382,7 +386,7 @@ export function Settings({ settings, onSave }: SettingsProps) {
               borderRadius: 'var(--radius-sm)',
             }}
           >
-            ↓ Export CSV
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><IoDownloadOutline /> Export CSV</span>
           </button>
           <button
             onClick={handleClearLogs}
@@ -419,7 +423,7 @@ export function Settings({ settings, onSave }: SettingsProps) {
               fontWeight: 600,
             }}
           >
-            🗑 Clear All Data
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><IoTrash /> Clear All Data</span>
           </button>
         </div>
       </Section>

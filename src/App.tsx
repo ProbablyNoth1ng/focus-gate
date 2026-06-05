@@ -7,6 +7,7 @@ import { Stats } from './pages/Stats'
 import { Activity } from './pages/Activity'
 import { IntentionModal } from './components/IntentionModal'
 import { ToastContainer } from './components/Toast'
+import { IoSettingsSharp, IoDocumentText, IoBarChart, IoStopwatch, IoPause, IoPlay, IoRemove, IoCopyOutline, IoClose } from 'react-icons/io5'
 import './styles/global.css'
 
 type Tab = 'settings' | 'history' | 'stats' | 'activity'
@@ -156,6 +157,9 @@ export default function App() {
           borderRadius: 20,
           fontSize: 11,
           fontWeight: 500,
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
           background: settings.isPaused ? 'rgba(245,166,35,0.15)' : 'var(--success-dim)',
           color: settings.isPaused ? 'var(--warning)' : 'var(--success)',
           border: `1px solid ${settings.isPaused ? 'rgba(245,166,35,0.3)' : 'rgba(78,203,141,0.3)'}`,
@@ -167,7 +171,7 @@ export default function App() {
           }))
         }}
         >
-          {settings.isPaused ? '⏸ Paused' : '● Active'}
+          {settings.isPaused ? <><IoPause style={{ fontSize: 11 }} /> Paused</> : <><IoPlay style={{ fontSize: 9 }} /> Active</>}
         </div>
  
         <div style={{ flex: 1 }} />
@@ -185,7 +189,7 @@ export default function App() {
     onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
   >
-    &#xE921;
+    <IoRemove style={{ fontSize: 16 }} />
   </button>
 
  
@@ -200,7 +204,7 @@ export default function App() {
     onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
   >
-    &#xE922;
+    <IoCopyOutline style={{ fontSize: 14 }} />
   </button>
  
   <button
@@ -220,7 +224,7 @@ export default function App() {
       e.currentTarget.style.color = 'var(--text-muted)'
     }}
   >
-    &#xE8BB;
+    <IoClose style={{ fontSize: 16 }} />
   </button>
 </div>
       </div>
@@ -256,7 +260,10 @@ export default function App() {
               if (activeTab !== tab) (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-muted)'
             }}
           >
-            {tab === 'settings' ? '⚙ Settings' : tab === 'history' ? '📋 History' : tab === 'stats' ? '📊 Stats' : '⏱ Activity'}
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {tab === 'settings' ? <IoSettingsSharp style={{ fontSize: 14 }} /> : tab === 'history' ? <IoDocumentText style={{ fontSize: 14 }} /> : tab === 'stats' ? <IoBarChart style={{ fontSize: 14 }} /> : <IoStopwatch style={{ fontSize: 14 }} />}
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </span>
           </button>
         ))}
       </div> 

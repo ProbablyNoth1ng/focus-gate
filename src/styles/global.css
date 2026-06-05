@@ -1,4 +1,7 @@
- 
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 @font-face {
   font-family: 'IBM Plex Mono';
   src: url('src/styles/fonts/IBMPlexMono-Regular.ttf') format('truetype');

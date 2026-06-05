@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import type { IntentionLog } from '../../shared/ipc-types'
+import { IoSwapVertical, IoArrowUp, IoArrowDown, IoArrowForward, IoDocumentTextOutline } from 'react-icons/io5'
 
 type SortKey = 'timestamp' | 'app_name' | 'word_count'
 type SortDir = 'ASC' | 'DESC'
@@ -36,8 +37,10 @@ export function History() {
   }
 
   const SortIcon = ({ col }: { col: SortKey }) => {
-    if (col !== sortBy) return <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>↕</span>
-    return <span style={{ color: 'var(--accent)', marginLeft: 4 }}>{sortDir === 'ASC' ? '↑' : '↓'}</span>
+    if (col !== sortBy) return <IoSwapVertical style={{ color: 'var(--text-muted)', marginLeft: 4, fontSize: 13 }} />
+    return sortDir === 'ASC'
+      ? <IoArrowUp style={{ color: 'var(--accent)', marginLeft: 4, fontSize: 13 }} />
+      : <IoArrowDown style={{ color: 'var(--accent)', marginLeft: 4, fontSize: 13 }} />
   }
 
   const formatDate = (iso: string) => {
@@ -75,7 +78,7 @@ export function History() {
           title="From date"
           style={{ width: 140 }}
         />
-        <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>→</span>
+        <IoArrowForward style={{ color: 'var(--text-muted)', fontSize: 12 }} />
         <input
           type="date"
           value={dateTo}
@@ -108,7 +111,7 @@ export function History() {
           <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>Loading…</div>
         ) : logs.length === 0 ? (
           <div style={{ textAlign: 'center', padding: 60, color: 'var(--text-muted)' }}>
-            <div style={{ fontSize: 36, marginBottom: 12 }}>📋</div>
+            <div style={{ fontSize: 36, marginBottom: 12, color: 'var(--text-muted)' }}><IoDocumentTextOutline /></div>
             {search ? 'No results found' : 'No intention logs yet'}
           </div>
         ) : (

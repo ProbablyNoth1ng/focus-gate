@@ -4,6 +4,7 @@ import type {
   IntentionLog,
   StatsData,
   ActivityData,
+  ActivityForDateResult,
 } from '../shared/ipc-types'
 
 declare global {
@@ -40,6 +41,7 @@ declare global {
       getActivityIcons: (appNames: string[]) => Promise<Record<string, string>>
       hideApp: (appName: string) => Promise<string[]>
       unhideApp: (appName: string) => Promise<string[]>
+      getActivityForDate: (date: string) => Promise<ActivityForDateResult>
       onInterceptionStart: (cb: (payload: InterceptionPayload) => void) => () => void
       onSettingsUpdated: (cb: (settings: AppSettings) => void) => () => void
       windowMinimize: () => void

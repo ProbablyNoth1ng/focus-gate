@@ -14,6 +14,8 @@ import {
   exportCsv,
   logIntention,
   logInterceptionResult,
+  getActivityForDate,
+  hasActivityForDate,
 } from './database'
 import { setAutostart } from './autostart'
 import { setTrayPaused } from './tray'
@@ -113,6 +115,8 @@ export function registerIpcHandlers(
     const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
     const hidden = [...(settings.hiddenApps ?? []), appName]
     store.set('hiddenApps', hidden)
+    const full = { ...settings, hiddenApps: hidden } as AppSettings
+    onSettingsChange(full)
     return hidden
   })
 
@@ -120,7 +124,30 @@ export function registerIpcHandlers(
     const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
     const hidden = (settings.hiddenApps ?? []).filter(h => h !== appName)
     store.set('hiddenApps', hidden)
+    const full = { ...settings, hiddenApps: hidden } as AppSettings
+    onSettingsChange(full)
     return hidden
+  })
+
+  // ── Activity for specific date ────────────────────────────
+  ipcMain.handle(IPC.GET_ACTIVITY_FOR_DATE, async (_event, date: string) => {
+    const hiddenApps: string[] = store.get('hiddenApps', []) as string[]
+    const apps = getActivityForDate(date, hiddenApps)
+    
+    // Use Date.UTC to avoid local timezone shifting the date
+    const [y, m, d] = date.split('-').map(Number)
+    const prevDateStr = new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10)
+    const nextDateStr = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10)
+    
+    const today = new Date().toLocaleDateString('en-CA')
+    
+    return {
+      apps,
+      hasPrevDay: hasActivityForDate(prevDateStr),
+      hasNextDay: nextDateStr <= today && hasActivityForDate(nextDateStr),
+      isToday: date === today,
+      selectedDate: date
+    }
   })
 
   // ── Export ────────────────────────────────────────────────

@@ -112,6 +112,26 @@ export function isSystemProcess(name: string): boolean {
   return false
 }
 
+/**
+ * Returns true if the name looks like a real user-facing application.
+ * Filters out temp files, prefixed junk, and other non-app processes
+ * that Windows Get-Process can return (e.g. ~DFA1234.tmp).
+ */
+export function isRealApp(name: string): boolean {
+  const lower = name.toLowerCase().replace(/\.exe$/i, '')
+  // Reject empty names
+  if (!lower) return false
+  // Reject names containing .tmp or other temp extensions
+  if (/\.tmp$|\.temp$|\.log$|\.dat$/.test(lower)) return false
+  // Reject names starting with ~ (Office/Windows Installer temps)
+  if (lower.startsWith('~')) return false
+  // Reject names that are just hex strings (installer GUIDs)
+  if (/^[a-f0-9]{8,}$/i.test(lower)) return false
+  // Reject names that are just numbers
+  if (/^\d+$/.test(lower)) return false
+  return true
+}
+
 // Dedup guard — 500ms TTL
 // Tracks the last interception time per exe — 500ms dedup only
 // (approval-based cooldown is handled separately via approvedExeNames)
