@@ -8,6 +8,9 @@ import type { IntentionLog, StatsData } from '../shared/ipc-types'
 let db: Database
 let SQL: SqlJsStatic
 let dbPath: string
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+
+const PERSIST_DEBOUNCE_MS = 30_000
 
 export async function initDatabase(): Promise<void> {
   dbPath = path.join(app.getPath('userData'), 'focusgate.db')
@@ -95,9 +98,27 @@ export async function initDatabase(): Promise<void> {
   console.log('[DB] Initialized at', dbPath)
 }
 
-function persist(): void {
+function persistNow(): void {
+  if (!db) return
+  if (persistTimer) {
+    clearTimeout(persistTimer)
+    persistTimer = null
+  }
   const data = db.export()
   fs.writeFileSync(dbPath, Buffer.from(data))
+}
+
+function schedulePersist(): void {
+  if (!db || persistTimer) return
+  persistTimer = setTimeout(() => {
+    persistTimer = null
+    persistNow()
+  }, PERSIST_DEBOUNCE_MS)
+  persistTimer.unref?.()
+}
+
+export function flushPendingPersist(): void {
+  persistNow()
 }
 
 function queryAll<T>(sql: string, params: (string | number)[] = []): T[] {
@@ -129,7 +150,7 @@ export function logIntention(
      VALUES (?, ?, ?, ?, ?, ?)`,
     [new Date().toISOString(), appName, exePath, purpose, wordCount, resumed ? 1 : 0]
   )
-  persist()
+  persistNow()
 }
 
 // Log the outcome of an interception: 'completed' = user submitted intention, 'dismissed' = user closed modal
@@ -139,7 +160,7 @@ export function logInterceptionResult(appName: string, outcome: 'completed' | 'd
     `INSERT INTO interception_results (timestamp, app_name, outcome) VALUES (?, ?, ?)`,
     [new Date().toISOString(), appName.toLowerCase(), outcome]
   )
-  persist()
+  persistNow()
 }
 
 
@@ -157,7 +178,7 @@ export function logActivity(appName: string, isBlocked = false): void {
     `INSERT INTO app_activity (timestamp, app_name, is_blocked) VALUES (?, ?, ?)`,
     [new Date().toISOString(), key, isBlocked ? 1 : 0]
   )
-  persist()
+  schedulePersist()
 }
 
 export function getLogs(
@@ -258,7 +279,7 @@ export function getStats(): StatsData {
 
 export function clearLogs(): void {
   db.run('DELETE FROM intention_logs')
-  persist()
+  persistNow()
 }
 
 export function clearActivity(): void {
@@ -266,7 +287,7 @@ export function clearActivity(): void {
   db.run('DELETE FROM app_activity')
   db.run('DELETE FROM app_usage')
   db.run('DELETE FROM daily_screen_time')
-  persist()
+  persistNow()
 }
 
 export function clearAll(): void {
@@ -276,7 +297,7 @@ export function clearAll(): void {
   db.run('DELETE FROM interception_results')
   db.run('DELETE FROM app_usage')
   db.run('DELETE FROM daily_screen_time')
-  persist()
+  persistNow()
 }
 
 // ── App Usage (Activity tracking) ───────────────────────────────────────────
@@ -306,7 +327,7 @@ export function accumulateUsage(appName: string): void {
      ON CONFLICT(app_name, date) DO UPDATE SET seconds = seconds + 60`,
     [key, today]
   )
-persist()
+  schedulePersist()
 }
 
 
@@ -329,6 +350,7 @@ function tickDailyScreenTime(): void {
      ON CONFLICT(date) DO UPDATE SET seconds = seconds + 60`,
     [today]
   )
+  schedulePersist()
 }
 
 export function startDailyScreenTimeTimer(): void {

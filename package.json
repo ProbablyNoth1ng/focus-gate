@@ -5,17 +5,18 @@
   "description": "Windows focus app that intercepts distraction apps and forces intention setting",
   "main": "dist/electron/main.js",
   "scripts": {
-    "dev": "npm run dev:copy-ps1 && npm run dev:tsc:once && concurrently -n vite,tsc,electron -c cyan,yellow,green \"npm run dev:vite\" \"npm run dev:tsc\" \"npm run dev:electron\"",
+    "dev": "npm run copy:ps1 && npm run dev:tsc:once && concurrently -n vite,tsc,electron -c cyan,yellow,green \"npm run dev:vite\" \"npm run dev:tsc\" \"npm run dev:electron\"",
     "dev:vite": "vite",
     "dev:tsc": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
     "dev:tsc:once": "tsc -p tsconfig.electron.json",
     "dev:electron": "wait-on http://localhost:5173 && nodemon --watch dist/electron --ext js --exec \"electron .\"",
-    "build": "npm run build:react && npm run fix-build && npm run build:electron",
+    "run:prodlike": "npm run build && electron .",
+    "build": "npm run build:react && npm run copy:ps1 && npm run fix-build && npm run build:electron",
     "build:react": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
     "dist": "npm run build && electron-builder",
     "dist:portable": "npm run build && electron-builder --win portable",
-    "dev:copy-ps1": "node -e \"const fs=require('fs');const path=require('path');fs.mkdirSync('dist/electron',{recursive:true});fs.copyFileSync('electron/wmiWatcher.ps1','dist/electron/wmiWatcher.ps1')\"",
+    "copy:ps1": "node -e \"const fs=require('fs');const path=require('path');fs.mkdirSync('dist/electron',{recursive:true});for(const file of ['wmiWatcher.ps1','foregroundWatcher.ps1']){fs.copyFileSync(path.join('electron',file),path.join('dist','electron',file))}\"",
     "fix-build": "node scripts/fix-build.js"
   },
   "dependencies": {

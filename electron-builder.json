@@ -14,6 +14,10 @@
       "to": "wmiWatcher.ps1"
     },
     {
+      "from": "electron/foregroundWatcher.ps1",
+      "to": "foregroundWatcher.ps1"
+    },
+    {
       "from": "assets/pssuspend.exe",
       "to": "pssuspend.exe"
     },

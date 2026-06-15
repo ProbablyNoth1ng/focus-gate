@@ -12,41 +12,37 @@ interface SuspendedProcess {
 }
 
 const suspendedProcesses = new Map<string, SuspendedProcess>()
-
-// Exe names currently approved — keyed by exe name (e.g. "telegram.exe").
-// Cooldown lasts until ALL processes with that exe name have exited.
-const approvedExeNames = new Set<string>()
-const exeWatchIntervals = new Map<string, ReturnType<typeof setInterval>>()
-
-export function isExeOnCooldown(exeName: string): boolean {
-  return approvedExeNames.has(exeName.toLowerCase())
-}
-
-export function setExeCooldown(exeName: string): void {
-  const key = exeName.toLowerCase()
-  if (approvedExeNames.has(key)) return  // already watching
-
-  approvedExeNames.add(key)
-  console.log(`[${new Date().toLocaleTimeString()}] [COOLDOWN] Approved ${exeName} — will re-intercept only after it fully closes`)
-
-  // Poll every 3s — clear approval once no process with this exe name is running
-  const interval = setInterval(() => {
-    exec(`tasklist /FI "IMAGENAME eq ${exeName}" /NH`, (_err, stdout) => {
-      const running = stdout.toLowerCase().includes(key)
-      if (!running) {
-        approvedExeNames.delete(key)
-        clearInterval(interval)
-        exeWatchIntervals.delete(key)
-        console.log(`[${new Date().toLocaleTimeString()}] [COOLDOWN] ${exeName} fully closed — will intercept on next open`)
-      }
-    })
-  }, 3_000)
-
-  exeWatchIntervals.set(key, interval)
-}
+const approvedPids = new Map<number, string>()
 
 function getPsSuspendPath(resourcesPath: string): string {
   return path.join(resourcesPath, 'pssuspend.exe')
+}
+
+function markPidApproved(pid: number, exePath: string): void {
+  approvedPids.set(pid, exePath.toLowerCase())
+  console.log(`[${new Date().toLocaleTimeString()}] [APPROVED] pid=${pid} exe=${path.basename(exePath).toLowerCase()}`)
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function pruneApprovedPids(): void {
+  for (const [pid] of approvedPids) {
+    if (!isProcessAlive(pid)) {
+      approvedPids.delete(pid)
+    }
+  }
+}
+
+export function isPidApproved(pid: number): boolean {
+  pruneApprovedPids()
+  return approvedPids.has(pid)
 }
 
 export async function suspendProcess(
@@ -65,7 +61,7 @@ export async function suspendProcess(
     try {
       await execAsync(`taskkill /PID ${pid} /F`)
     } catch {
-      // Process may have already exited
+      // Process may have already exited.
     }
     suspendedProcesses.set(exePath.toLowerCase(), { pid, exePath, suspended: false })
     return false
@@ -83,21 +79,31 @@ export async function resumeProcess(
   }
 
   if (proc.suspended) {
+    markPidApproved(proc.pid, exePath)
     try {
       const psSuspend = getPsSuspendPath(resourcesPath)
       await execAsync(`"${psSuspend}" -accepteula -r ${proc.pid}`)
       console.log(`[${new Date().toLocaleTimeString()}] [RESUME] pid=${proc.pid} exe=${exePath}`)
     } catch {
-      // PID died while suspended (app self-respawned, e.g. Discord updater) — already running
-      console.log(`[${new Date().toLocaleTimeString()}] [RESUME] pid=${proc.pid} already gone (self-respawned), skipping relaunch`)
+      approvedPids.delete(proc.pid)
+      console.log(`[${new Date().toLocaleTimeString()}] [RESUME] pid=${proc.pid} already gone, skipping relaunch`)
     }
   } else {
-    // Was killed — relaunch only if not already running
-    exec(`tasklist /FI "IMAGENAME eq ${path.basename(exePath)}" /NH`, (_err, stdout) => {
-      if (!stdout.toLowerCase().includes(path.basename(exePath).toLowerCase())) {
-        shell.openPath(exePath)
+    try {
+      const child = require('child_process').spawn(exePath, [], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+      if (child.pid) {
+        markPidApproved(child.pid, exePath)
       }
-    })
+      child.unref()
+      console.log(`[${new Date().toLocaleTimeString()}] [RELAUNCH] pid=${child.pid ?? 'unknown'} exe=${exePath}`)
+    } catch (err) {
+      console.error(`[${new Date().toLocaleTimeString()}] [RELAUNCH FAILED] exe=${exePath}:`, err)
+      await shell.openPath(exePath)
+    }
   }
 
   suspendedProcesses.delete(exePath.toLowerCase())
@@ -109,7 +115,7 @@ export function cancelInterception(exePath: string): void {
     try {
       exec(`taskkill /PID ${proc.pid} /F`)
     } catch {
-      // Ignore
+      // Ignore.
     }
     suspendedProcesses.delete(exePath.toLowerCase())
   }

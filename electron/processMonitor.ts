@@ -1,13 +1,25 @@
-import { spawn, exec, ChildProcess } from 'child_process'
+import { spawn, execFile, execFileSync, ChildProcess } from 'child_process'
 import path from 'path'
 
+interface ForegroundProcessInfo {
+  pid: number
+  name: string
+}
+
 let wmiProcess: ChildProcess | null = null
+let foregroundProcess: ChildProcess | null = null
 let watchdogTimer: ReturnType<typeof setInterval> | null = null
 let currentScriptPath = ''
+let currentForegroundScriptPath = ''
 let currentCallback: ((pid: number, name: string) => void) | null = null
+let currentForegroundCallback: ((current: ForegroundProcessInfo, previous: ForegroundProcessInfo | null) => void) | null = null
+let watchdogInFlight = false
+
+function toPowerShellEncodedCommand(command: string): string {
+  return Buffer.from(command, 'utf16le').toString('base64')
+}
 
 const SYSTEM_NOISE = new Set([
-  // ── Core Windows System ────────────────────────────────────────
   'svchost.exe', 'conhost.exe', 'runtimebroker.exe',
   'taskhostw.exe', 'searchindexer.exe', 'wmiprvse.exe',
   'fontdrvhost.exe', 'dwm.exe', 'csrss.exe', 'lsass.exe',
@@ -18,48 +30,32 @@ const SYSTEM_NOISE = new Set([
   'system', 'system idle process', 'secure system', 'memory compression',
   'svchost', 'csrss', 'lsass', 'smss', 'wininit', 'services',
   'winlogon', 'dwm', 'sihost', 'ctfmon', 'fontdrvhost',
-
-  // ── Windows Shell & UI ─────────────────────────────────────────
   'explorer.exe', 'shellexperiencehost.exe', 'startmenuexperiencehost.exe',
   'searchapp.exe', 'searchprotocolhost.exe', 'searchfilterhost.exe',
   'textinputhost.exe', 'lockapp.exe', 'logonui.exe', 'logon.scr',
   'ui0detect.exe', 'dismhost.exe', 'musnotification.exe',
   'musnotifyicon.exe', 'tmui.exe', 'shellhost.exe',
   'backgroundtaskhost.exe', 'openwith.exe',
-
-  // ── Windows Update & Servicing ─────────────────────────────────
   'wuauclt.exe', 'usoclient.exe', 'wuapp.exe', 'trustedinstaller.exe',
   'tiworker.exe', 'tiworker', 'trustedinstaller',
   'msiexec.exe', 'mersetup.exe', 'wermgr.exe', 'werfault.exe',
   'musnotification', 'musnotifyicon',
-
-  // ── Windows Security & Defender ────────────────────────────────
   'smartscreen.exe', 'smartscreen',
   'senseir.exe', 'sensecnc.exe', 'sensespot.exe',
   'mpcmdrun.exe', 'msmpeng.exe',
   'securityhealthservice.exe', 'securityhealthsystray.exe',
   'nis.exe',
-
-  // ── Windows Licensing & Activation ─────────────────────────────
   'sppsvc.exe', 'sppsvc', 'sppextcomobj.exe', 'sppextcomobj',
   'slui.exe', 'slui', 'sppnotification.exe',
   'osppsvc.exe', 'sppuinotify.exe',
-
-  // ── Windows Store & AppX ───────────────────────────────────────
   'phoneexperiencehost.exe', 'phoneexperiencehost',
   'gamingservices.exe', 'gamingservices',
   'xboxapp.exe', 'xboxgipservice.exe', 'xboxgip.exe',
   'store.exe', 'wshelper.exe', 'installmanagerapp.exe', 'installmanagerapp',
   'sdxhelper.exe', 'sdxhelper',
-
-  // ── Windows Search & Indexing ──────────────────────────────────
   'searchindexer', 'searchprotocolhost', 'searchfilterhost',
   'searchapp', 'SearchHost.exe', 'SearchUI.exe',
-
-  // ── Windows Input & Accessibility ──────────────────────────────
   'chsihost.exe', 'chsihost',
-
-  // ── Developer tools & runtime processes ────────────────────────
   'node.exe', 'npm.exe', 'npx.exe', 'yarn.exe', 'pnpm.exe',
   'python.exe', 'python3.exe', 'pip.exe', 'pip3.exe',
   'java.exe', 'javaw.exe',
@@ -67,25 +63,15 @@ const SYSTEM_NOISE = new Set([
   'rustc.exe', 'cargo.exe',
   'dotnet.exe', 'devenv.exe',
   'git.exe', 'git-bash.exe', 'git',
-
-  // ── Electron & dev servers ─────────────────────────────────────
   'electron.exe', 'vite.exe', 'webpack.exe', 'esbuild.exe',
   'tsc.exe', 'ts-node.exe',
-
-  // ── Office & OneDrive background ───────────────────────────────
   'officec2rclient.exe', 'officec2rclient',
   'officeclicktorun.exe', 'integrator.exe',
   'onedrive.exe', 'onedriveupdater.exe',
   'groove.exe', 'msosync.exe',
-
-  // ── Package managers & build tools ─────────────────────────────
   'make.exe', 'cmake.exe', 'ninja.exe',
   'msbuild.exe', 'csc.exe', 'vbc.exe',
-
-  // ── Remote Desktop ─────────────────────────────────────────────
   'msrdc.exe', 'msrdc', 'mstsc.exe',
-
-  // ── Misc system tools ──────────────────────────────────────────
   'updater.exe', 'updater',
   'where.exe', 'where',
   'wmic.exe', 'wmic',
@@ -98,71 +84,61 @@ const SYSTEM_NOISE = new Set([
   'conhost',
   'taskhostw',
   'ctfmon',
-
-  // ── FocusGate (don't track ourselves) ──────────────────────────
   'focusgate.exe',
   'focusgate-dev.exe',
 ])
 
-export function isSystemProcess(name: string): boolean {
-  const lower = name.toLowerCase()
-  // Check with and without .exe suffix
-  if (SYSTEM_NOISE.has(lower)) return true
-  if (!lower.endsWith('.exe') && SYSTEM_NOISE.has(lower + '.exe')) return true
-  return false
+const recentlyIntercepted = new Map<string, number>()
+const preExistingPids = new Map<number, { exeName: string; creationDate: string }>()
+
+export function normalizeExeName(name: string): string {
+  const trimmed = name.trim().toLowerCase()
+  if (!trimmed) return ''
+  return trimmed.endsWith('.exe') ? trimmed : `${trimmed}.exe`
 }
 
-/**
- * Returns true if the name looks like a real user-facing application.
- * Filters out temp files, prefixed junk, and other non-app processes
- * that Windows Get-Process can return (e.g. ~DFA1234.tmp).
- */
+export function isSystemProcess(name: string): boolean {
+  const lower = name.toLowerCase().trim()
+  return SYSTEM_NOISE.has(lower) || SYSTEM_NOISE.has(normalizeExeName(lower))
+}
+
 export function isRealApp(name: string): boolean {
-  const lower = name.toLowerCase().replace(/\.exe$/i, '')
-  // Reject empty names
+  const lower = normalizeExeName(name).replace(/\.exe$/i, '')
   if (!lower) return false
-  // Reject names containing .tmp or other temp extensions
   if (/\.tmp$|\.temp$|\.log$|\.dat$/.test(lower)) return false
-  // Reject names starting with ~ (Office/Windows Installer temps)
   if (lower.startsWith('~')) return false
-  // Reject names that are just hex strings (installer GUIDs)
   if (/^[a-f0-9]{8,}$/i.test(lower)) return false
-  // Reject names that are just numbers
   if (/^\d+$/.test(lower)) return false
   return true
 }
 
-// Dedup guard — 500ms TTL
-// Tracks the last interception time per exe — 500ms dedup only
-// (approval-based cooldown is handled separately via approvedExeNames)
-const recentlyIntercepted = new Map<string, number>()
-
-export function shouldIntercept(name: string): boolean {
-  const last = recentlyIntercepted.get(name.toLowerCase())
+export function shouldInterceptProcess(pid: number, name: string): boolean {
+  const key = `${normalizeExeName(name)}#${pid}`
+  const last = recentlyIntercepted.get(key)
   if (last && Date.now() - last < 500) return false
-  recentlyIntercepted.set(name.toLowerCase(), Date.now())
+  recentlyIntercepted.set(key, Date.now())
   return true
 }
 
-export function resetInterceptCooldown(name: string): void {
-  recentlyIntercepted.delete(name.toLowerCase())
+export function resetInterceptCooldown(pid: number, name: string): void {
+  recentlyIntercepted.delete(`${normalizeExeName(name)}#${pid}`)
 }
 
-// PIDs that were already running when a block rule was added — never intercept these
-const preExistingPids = new Set<number>()
-
-/**
- * Register PIDs that are already running for a given exe name so they are
- * never intercepted. Call this right after the user adds an app to the block list.
- */
 export function excludeExistingPids(exeName: string): Promise<void> {
   return new Promise((resolve) => {
-    exec(`tasklist /FI "IMAGENAME eq ${exeName}" /FO CSV /NH`, (err, stdout) => {
+    const normalizedExeName = normalizeExeName(exeName)
+    const processName = normalizedExeName.replace(/\.exe$/i, '')
+    const psCommand = `$items = Get-Process -Name '${processName}' -ErrorAction SilentlyContinue; foreach ($item in $items) { if ($item.StartTime) { Write-Output "$($item.Id)|$($item.StartTime.ToUniversalTime().ToString('o'))" } }`
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', toPowerShellEncodedCommand(psCommand)], (err, stdout) => {
       if (!err) {
         for (const line of stdout.trim().split('\n')) {
-          const parts = line.split(',')
-          const pid = parseInt(parts[1]?.replace(/"/g, '') ?? '0', 10)
-          if (pid) preExistingPids.add(pid)
+          const trimmed = line.trim()
+          if (!trimmed) continue
+          const [pidStr, creationDate] = trimmed.split('|')
+          const pid = parseInt(pidStr, 10)
+          if (pid && creationDate) {
+            preExistingPids.set(pid, { exeName: normalizedExeName, creationDate: creationDate.trim() })
+          }
         }
       }
       resolve()
@@ -170,26 +146,49 @@ export function excludeExistingPids(exeName: string): Promise<void> {
   })
 }
 
-/** Returns true if this PID was running before the block rule was added. */
-export function isPreExistingPid(pid: number): boolean {
-  return preExistingPids.has(pid)
+export function isPreExistingPid(pid: number, exeName?: string): boolean {
+  const tracked = preExistingPids.get(pid)
+  if (!tracked) return false
+
+  const normalizedExeName = exeName ? normalizeExeName(exeName) : tracked.exeName
+  if (tracked.exeName !== normalizedExeName) {
+    preExistingPids.delete(pid)
+    return false
+  }
+
+  try {
+    const psCommand = `$item = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($item -and $item.StartTime) { Write-Output $item.StartTime.ToUniversalTime().ToString('o') }`
+    const currentCreationDate = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', toPowerShellEncodedCommand(psCommand)], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+    }).trim()
+
+    if (!currentCreationDate || currentCreationDate !== tracked.creationDate) {
+      preExistingPids.delete(pid)
+      return false
+    }
+  } catch {
+    preExistingPids.delete(pid)
+    return false
+  }
+
+  return true
 }
 
-/** Clean up a PID from the exclusion set once the process exits. */
 export function releasePreExistingPid(pid: number): void {
   preExistingPids.delete(pid)
 }
 
 export function startWmiWatcher(
   onProcess: (pid: number, name: string) => void,
-  scriptDir: string   // directory containing wmiWatcher.ps1
+  scriptDir: string
 ) {
+  stopWmiWatcher()
   currentScriptPath = scriptDir
   currentCallback = onProcess
 
   const ps1Path = path.join(scriptDir, 'wmiWatcher.ps1')
-
-  wmiProcess = spawn('powershell', [
+  wmiProcess = spawn('powershell.exe', [
     '-NoProfile',
     '-NonInteractive',
     '-ExecutionPolicy', 'Bypass',
@@ -206,13 +205,11 @@ export function startWmiWatcher(
     for (const line of lines) {
       const trimmed = line.trim()
       if (!trimmed) continue
-      const [pidStr, name] = trimmed.split('|')
-      const pid = parseInt(pidStr, 10)
-      if (!isNaN(pid) && name) {
-        // Strip .exe suffix for cleaner app names
-        const cleanName = name.trim().replace(/\.exe$/i, '')
-        onProcess(pid, cleanName)
-      }
+      const [pidText, exeNameRaw] = trimmed.split('|')
+      const exeName = normalizeExeName(exeNameRaw ?? '')
+      const pid = parseInt(pidText, 10)
+      if (!exeName || isNaN(pid)) continue
+      onProcess(pid, exeName)
     }
   })
 
@@ -222,40 +219,110 @@ export function startWmiWatcher(
 
   wmiProcess.on('exit', (code) => {
     console.log(`[WMI] Watcher exited with code ${code}`)
-    if (code !== 0 && code !== null && currentCallback) {
-      setTimeout(() => startWmiWatcher(currentCallback!, currentScriptPath), 2000)
+    if (currentCallback && code !== 0 && code !== null) {
+      setTimeout(() => {
+        if (currentCallback) startWmiWatcher(currentCallback, currentScriptPath)
+      }, 2000)
     }
   })
 
-  console.log('[WMI] Watcher started, script:', ps1Path)
+  console.log('[WMI] Watcher started via process-start events:', ps1Path)
 }
 
 export function stopWmiWatcher() {
-  currentCallback = null  // prevent auto-restart
+  currentCallback = null
   wmiProcess?.kill()
   wmiProcess = null
 }
 
-export function startFallbackWatchdog(
-  blockedNames: Set<string>,
-  onDetected: (name: string) => void
+export function startForegroundWatcher(
+  onForegroundChange: (current: ForegroundProcessInfo, previous: ForegroundProcessInfo | null) => void,
+  scriptDir: string
 ) {
-  let knownPids = new Set<string>()
+  currentForegroundScriptPath = scriptDir
+  currentForegroundCallback = onForegroundChange
+
+  const ps1Path = path.join(scriptDir, 'foregroundWatcher.ps1')
+
+  foregroundProcess = spawn('powershell', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', ps1Path,
+  ])
+
+  let buffer = ''
+  let lastForeground: ForegroundProcessInfo | null = null
+
+  foregroundProcess.stdout?.on('data', (chunk: Buffer) => {
+    buffer += chunk.toString()
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      const [pidStr, name] = trimmed.split('|')
+      const pid = parseInt(pidStr, 10)
+      const exeName = normalizeExeName(name ?? '')
+      if (isNaN(pid) || !exeName) continue
+
+      const nextForeground = { pid, name: exeName }
+      if (lastForeground?.pid === nextForeground.pid && lastForeground.name === nextForeground.name) {
+        continue
+      }
+
+      const previousForeground = lastForeground
+      lastForeground = nextForeground
+      onForegroundChange(nextForeground, previousForeground)
+    }
+  })
+
+  foregroundProcess.stderr?.on('data', (data: Buffer) => {
+    console.error('[FOREGROUND] stderr:', data.toString())
+  })
+
+  foregroundProcess.on('exit', (code) => {
+    console.log(`[FOREGROUND] Watcher exited with code ${code}`)
+    if (code !== 0 && code !== null && currentForegroundCallback) {
+      setTimeout(() => startForegroundWatcher(currentForegroundCallback!, currentForegroundScriptPath), 2000)
+    }
+  })
+
+  console.log('[FOREGROUND] Watcher started, script:', ps1Path)
+}
+
+export function stopForegroundWatcher() {
+  currentForegroundCallback = null
+  foregroundProcess?.kill()
+  foregroundProcess = null
+}
+
+export function startFallbackWatchdog(
+  getBlockedNames: () => Set<string>,
+  onDetected: (pid: number, name: string) => void
+) {
+  const snapshotCommand = `$ProgressPreference='SilentlyContinue'; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { if ($_.Id -and $_.ProcessName -and $_.StartTime) { Write-Output "$($_.Id)|$($_.ProcessName).exe" } }`
 
   watchdogTimer = setInterval(() => {
-    exec('tasklist /FO CSV /NH', (err, stdout) => {
+    const blockedNames = getBlockedNames()
+    if (blockedNames.size === 0 || watchdogInFlight) return
+
+    watchdogInFlight = true
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', toPowerShellEncodedCommand(snapshotCommand)], { timeout: 5000 }, (err, stdout) => {
+      watchdogInFlight = false
       if (err) return
       for (const line of stdout.trim().split('\n')) {
-        const parts = line.split(',')
-        const name = parts[0]?.replace(/"/g, '').toLowerCase()
-        const pid  = parts[1]?.replace(/"/g, '')
-        if (!name || !pid || knownPids.has(pid)) continue
-        knownPids.add(pid)
-        if (blockedNames.has(name)) onDetected(name)
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        const [pidText, exeNameRaw] = trimmed.split('|')
+        const name = normalizeExeName(exeNameRaw ?? '')
+        const pid = parseInt(pidText, 10)
+        if (!name || !pid || !blockedNames.has(name)) continue
+        onDetected(pid, name)
       }
-      if (knownPids.size > 1000) knownPids = new Set()
     })
-  }, 10_000)
+  }, 15_000)
 
   return watchdogTimer
 }

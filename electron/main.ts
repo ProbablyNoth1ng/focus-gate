@@ -4,69 +4,44 @@ import {
   ipcMain,
 } from 'electron'
 import path from 'path'
-import { exec } from 'child_process'
 import Store from 'electron-store'
 import { AppSettings, DEFAULT_SETTINGS, IPC, InterceptionPayload } from '../shared/ipc-types'
-import { initDatabase, logActivity, logInterceptionResult, accumulateUsage, startDailyScreenTimeTimer, stopDailyScreenTimeTimer } from './database'
+import { initDatabase, logActivity, logInterceptionResult, accumulateUsage, startDailyScreenTimeTimer, stopDailyScreenTimeTimer, flushPendingPersist } from './database'
 import {
   startWmiWatcher,
+  startForegroundWatcher,
   stopWmiWatcher,
+  stopForegroundWatcher,
   startFallbackWatchdog,
   stopFallbackWatchdog,
   isSystemProcess,
   isRealApp,
-  shouldIntercept,
+  shouldInterceptProcess,
   excludeExistingPids,
   isPreExistingPid,
   releasePreExistingPid,
+  normalizeExeName,
 } from './processMonitor'
-import { suspendProcess, resumeProcess, cancelInterception, isExeOnCooldown, setExeCooldown } from './interception'
+import { suspendProcess, resumeProcess, cancelInterception, isPidApproved, pruneApprovedPids } from './interception'
 import { initTray, destroyTray } from './tray'
 import { registerIpcHandlers } from './ipcHandlers'
 import { setAutostart } from './autostart'
+import { debugLog, getDebugLogPath } from './debugLog'
 
-// ─── Store ───────────────────────────────────────────────────────────────────
 const store = new Store<AppSettings>({ defaults: DEFAULT_SETTINGS })
 
-// ─── State ───────────────────────────────────────────────────────────────────
 let mainWindow: BrowserWindow | null = null
 let modalWindow: BrowserWindow | null = null
-let intercepting = false          // prevents concurrent interceptions
-let startupGraceUntil = 0        // no interceptions during startup seeding
+let intercepting = false
+let startupGraceUntil = 0
 let currentInterception: InterceptionPayload | null = null
 
-// ── Active-app PID tracking for periodic usage accumulation ─────────────────
-// Maps non-blocked app name → set of currently-live PIDs.
-// Every 60 s we check which PIDs are still alive and credit +60 s for each
-// app that still has at least one live PID.
-const activeAppPids = new Map<string, Set<number>>()
 let appUsageTimer: ReturnType<typeof setInterval> | null = null
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
+let currentForegroundAppName: string | null = null
 
 function tickAppUsage(): void {
-  for (const [appName, pids] of activeAppPids) {
-    // Prune dead PIDs
-    for (const pid of pids) {
-      if (!isProcessAlive(pid)) {
-        pids.delete(pid)
-      }
-    }
-
-    if (pids.size === 0) {
-      activeAppPids.delete(appName)
-    } else {
-      // App is still running — credit one minute of usage
-      accumulateUsage(appName)
-    }
-  }
+  if (!currentForegroundAppName) return
+  accumulateUsage(currentForegroundAppName)
 }
 
 function startAppUsageTimer(): void {
@@ -76,20 +51,15 @@ function startAppUsageTimer(): void {
 }
 
 function stopAppUsageTimer(): void {
-  if (appUsageTimer) {
-    tickAppUsage()               // final tick before shutdown
-    clearInterval(appUsageTimer)
-    appUsageTimer = null
-    console.log('[USAGE] Periodic app-usage timer stopped')
-  }
+  if (!appUsageTimer) return
+  tickAppUsage()
+  clearInterval(appUsageTimer)
+  appUsageTimer = null
+  console.log('[USAGE] Periodic app-usage timer stopped')
 }
 
 const isDev = !app.isPackaged
 
-
-
-// wmiWatcher.ps1 sits next to main.js in dist/electron/ (copied by dev:copy-ps1 script)
-// pssuspend.exe sits in assets/ at project root (or resources/ in prod)
 const scriptPath = isDev
   ? __dirname
   : process.resourcesPath
@@ -98,57 +68,63 @@ const resourcesPath = isDev
   ? path.join(__dirname, '..', '..', 'assets')
   : process.resourcesPath
 
-// ─── Debug timestamp helper ──────────────────────────────────────────────────
 function ts() {
   const d = new Date()
-  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
 }
 
-// ─── Focus Hours Check ───────────────────────────────────────────────────────
 function isInFocusHours(): boolean {
   const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
   if (!settings.focusHoursEnabled) return true
 
   const now = new Date()
   const [startH, startM] = settings.focusStart.split(':').map(Number)
-  const [endH, endM]     = settings.focusEnd.split(':').map(Number)
-  const nowMins  = now.getHours() * 60 + now.getMinutes()
+  const [endH, endM] = settings.focusEnd.split(':').map(Number)
+  const nowMins = now.getHours() * 60 + now.getMinutes()
   const startMin = startH * 60 + startM
-  const endMin   = endH   * 60 + endM
+  const endMin = endH * 60 + endM
   return nowMins >= startMin && nowMins <= endMin
 }
 
-// ─── Interception Handler ────────────────────────────────────────────────────
+function getBlockedAppForExe(exeName: string): AppSettings['blockedApps'][number] | undefined {
+  const normalizedExeName = normalizeExeName(exeName)
+  const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
+  return settings.blockedApps.find(
+    (blockedApp) => blockedApp.enabled && normalizeExeName(path.basename(blockedApp.exePath)) === normalizedExeName
+  )
+}
+
 async function handleInterception(pid: number, exeName: string): Promise<void> {
   const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
+  const normalizedExeName = normalizeExeName(exeName)
 
   const now = Date.now()
   const pauseUntil = settings.pauseUntil
   if (settings.isPaused || (pauseUntil && now < pauseUntil)) {
-    console.log(`[${ts()}] [SKIP] FocusGate paused — ${exeName}`)
+    console.log(`[${ts()}] [SKIP] FocusGate paused - ${normalizedExeName}`)
+    debugLog(`[INTERCEPT SKIP] paused exe=${normalizedExeName} pid=${pid}`)
     return
   }
 
   if (!isInFocusHours()) {
-    console.log(`[${ts()}] [SKIP] Outside focus hours — ${exeName}`)
+    console.log(`[${ts()}] [SKIP] Outside focus hours - ${normalizedExeName}`)
+    debugLog(`[INTERCEPT SKIP] focus-hours exe=${normalizedExeName} pid=${pid}`)
     return
   }
 
-  // Don't intercept during startup grace period (WMI is still seeding existing PIDs)
   if (Date.now() < startupGraceUntil) {
-    console.log(`[${ts()}] [SKIP] Startup grace active — ${exeName}`)
+    console.log(`[${ts()}] [SKIP] Startup grace active - ${normalizedExeName}`)
+    debugLog(`[INTERCEPT SKIP] startup-grace exe=${normalizedExeName} pid=${pid}`)
     return
   }
 
-  // Don't allow two concurrent interceptions
   if (intercepting) {
-    console.log(`[${ts()}] [SKIP] Already intercepting — ${exeName}`)
+    console.log(`[${ts()}] [SKIP] Already intercepting - ${normalizedExeName}`)
+    debugLog(`[INTERCEPT SKIP] already-intercepting exe=${normalizedExeName} pid=${pid}`)
     return
   }
 
-  const blockedApp = settings.blockedApps.find(
-    a => a.enabled && a.exePath.toLowerCase().endsWith(exeName.toLowerCase())
-  )
+  const blockedApp = getBlockedAppForExe(normalizedExeName)
   if (!blockedApp) return
 
   if (modalWindow && !modalWindow.isDestroyed()) {
@@ -157,7 +133,8 @@ async function handleInterception(pid: number, exeName: string): Promise<void> {
   }
 
   intercepting = true
-  console.log(`[${ts()}] [INTERCEPT] Starting — pid=${pid} exe=${exeName}`)
+  console.log(`[${ts()}] [INTERCEPT] Starting - pid=${pid} exe=${normalizedExeName}`)
+  debugLog(`[INTERCEPT START] exe=${normalizedExeName} pid=${pid}`)
   const suspended = await suspendProcess(pid, blockedApp.exePath, resourcesPath)
 
   modalWindow = new BrowserWindow({
@@ -179,7 +156,7 @@ async function handleInterception(pid: number, exeName: string): Promise<void> {
     },
   })
 
-  modalWindow.on('close', (e) => e.preventDefault())
+  modalWindow.on('close', (event) => event.preventDefault())
 
   const payload: InterceptionPayload = {
     appName: blockedApp.name,
@@ -193,17 +170,13 @@ async function handleInterception(pid: number, exeName: string): Promise<void> {
   if (isDev) {
     await modalWindow.loadURL('http://localhost:5173?modal=true')
   } else {
-    await modalWindow.loadURL('file://' + path.join(app.getAppPath(), 'dist/renderer/index.html').replace(/\\/g, '/') + '?modal=true')
+    await modalWindow.loadURL(`file://${path.join(app.getAppPath(), 'dist/renderer/index.html').replace(/\\/g, '/')}?modal=true`)
   }
 
   modalWindow.show()
   modalWindow.focus()
-  console.log(`[${ts()}] [MODAL] Shown — app="${blockedApp.name}" pid=${pid}`)
+  console.log(`[${ts()}] [MODAL] Shown - app="${blockedApp.name}" pid=${pid}`)
 
-  // ── Send payload reliably ────────────────────────────────────────────────────
-  // did-finish-load fires before React mounts and subscribes to onInterceptionStart.
-  // Strategy: send on did-finish-load AND re-send 600 ms later so the listener
-  // that React registers in useEffect always catches it.
   const sendPayload = () => {
     if (modalWindow && !modalWindow.isDestroyed()) {
       modalWindow.webContents.send(IPC.INTERCEPTION_START, payload)
@@ -215,13 +188,14 @@ async function handleInterception(pid: number, exeName: string): Promise<void> {
     setTimeout(sendPayload, 600)
   })
 
-  // Allow renderer to ask for the current payload after it has mounted
-  // Use handle (not handleOnce) so re-renders and second windows can always get it
-  try { ipcMain.removeHandler('interception:get-current') } catch {}
+  try {
+    ipcMain.removeHandler('interception:get-current')
+  } catch {
+    // No previous handler to remove.
+  }
   ipcMain.handle('interception:get-current', () => currentInterception)
 }
 
-// ─── Window Creation ─────────────────────────────────────────────────────────
 function createMainWindow(): BrowserWindow {
   const iconPath = path.join(resourcesPath, 'logo.png')
   const win = new BrowserWindow({
@@ -243,31 +217,26 @@ function createMainWindow(): BrowserWindow {
   if (isDev) {
     win.loadURL('http://localhost:5173')
   } else {
-    win.loadURL('file://' + path.join(app.getAppPath(), 'dist/renderer/index.html').replace(/\\/g, '/'))
+    win.loadURL(`file://${path.join(app.getAppPath(), 'dist/renderer/index.html').replace(/\\/g, '/')}`)
   }
-  
 
   win.once('ready-to-show', () => {
     if (process.argv.includes('--minimize-to-tray')) return
     win.show()
-    // win.webContents.openDevTools({ mode: 'detach' }) 
   })
-  
-  
 
-   win.on('close', (e) => {
-    e.preventDefault()
+  win.on('close', (event) => {
+    event.preventDefault()
     win.hide()
   })
 
   return win
 }
 
-// ─── IPC: Modal completion ───────────────────────────────────────────────────
 function registerModalIpc(): void {
   ipcMain.on(IPC.INTENTION_CANCEL, async () => {
     if (currentInterception) {
-      console.log(`[${ts()}] [CANCEL] User dismissed — app="${currentInterception.appName}"`)
+      console.log(`[${ts()}] [CANCEL] User dismissed - app="${currentInterception.appName}"`)
       logInterceptionResult(currentInterception.appName, 'dismissed')
       cancelInterception(currentInterception.exePath)
       currentInterception = null
@@ -281,114 +250,130 @@ function registerModalIpc(): void {
   })
 
   ipcMain.on('intention:resume', async (_event, exePath: string) => {
-    console.log(`[${ts()}] [SUBMIT] Purpose submitted — resuming exe=${exePath}`)
+    console.log(`[${ts()}] [SUBMIT] Purpose submitted - resuming exe=${exePath}`)
     if (modalWindow && !modalWindow.isDestroyed()) {
       modalWindow.destroy()
       modalWindow = null
     }
     currentInterception = null
-    intercepting = false  // clear BEFORE resume so next real open isn't blocked
+    intercepting = false
     console.log(`[${ts()}] [STATE] intercepting=false (submitted)`)
     await resumeProcess(exePath, resourcesPath)
   })
 }
 
-// ─── App Lifecycle ───────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   try {
     await initDatabase()
     startDailyScreenTimeTimer()
     startAppUsageTimer()
+    debugLog(`[APP READY] debug-log=${getDebugLogPath()}`)
   } catch (err) {
     console.error('[DB] Failed to initialize database:', err)
   }
 
-  // ── Autostart is off by default; user can enable it in Settings ──────────────
   const hasSetStartup = store.has('launchAtStartup')
   if (!hasSetStartup) {
-    // Brand new install — leave autostart disabled (default is false)
     store.set('launchAtStartup', false)
     setAutostart(false)
-    console.log('[Autostart] First run — autostart disabled by default')
+    console.log('[Autostart] First run - autostart disabled by default')
   }
 
   function getBlockedNames(): Set<string> {
     const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
     return new Set(
       settings.blockedApps
-        .filter(a => a.enabled)
-        .map(a => path.basename(a.exePath).toLowerCase())
+        .filter((blockedApp) => blockedApp.enabled)
+        .map((blockedApp) => normalizeExeName(path.basename(blockedApp.exePath)))
     )
   }
 
-  // ── Seed pre-existing PIDs on startup ───────────────────────────────────────
-  // Any blocked app already running when FocusGate starts must never be
-  // intercepted — user was using it before the guard became active.
   const startupSettings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
   await Promise.all(
     startupSettings.blockedApps
-      .filter(a => a.enabled)
-      .map(a => excludeExistingPids(path.basename(a.exePath)))
+      .filter((blockedApp) => blockedApp.enabled)
+      .map((blockedApp) => excludeExistingPids(path.basename(blockedApp.exePath)))
   )
 
-  // Give 5 seconds for the WMI watcher to seed existing PIDs before intercepting
   startupGraceUntil = Date.now() + 5000
 
   startWmiWatcher((pid, name) => {
     if (isSystemProcess(name)) return
     if (!isRealApp(name)) return
 
-    // wmiWatcher only fires for NEW pids — safe to remove from pre-existing set
     releasePreExistingPid(pid)
+    pruneApprovedPids()
 
-    const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
-    const isBlocked = settings.blockedApps.some(
-      a => a.enabled && a.exePath.toLowerCase().endsWith(name.toLowerCase())
-    )
-
-    // Only log activity for non-blocked apps.
-    // Blocked apps are counted via interception_results (completed/dismissed),
-    // which gives accurate 1-per-open counts without multi-process spam.
-    if (!isBlocked) {
-      const cleanName = name.replace(/\.exe$/i, '')
-      logActivity(cleanName, false)
-
-      // Track PID so periodic tickAppUsage() can keep crediting time
-      if (!activeAppPids.has(cleanName)) {
-        activeAppPids.set(cleanName, new Set())
-      }
-      activeAppPids.get(cleanName)!.add(pid)
-
-      // Initial credit for the first minute
-      accumulateUsage(cleanName)
+    const normalizedExeName = normalizeExeName(name)
+    const blockedApp = getBlockedAppForExe(normalizedExeName)
+    const isBlocked = Boolean(blockedApp)
+    if (isBlocked) {
+      debugLog(`[WATCHER] candidate source=primary exe=${normalizedExeName} pid=${pid}`)
     }
 
-    // Skip PIDs that were already running when the rule was added
-    if (isBlocked && !isPreExistingPid(pid) && !isExeOnCooldown(name)) {
-      setExeCooldown(name)  // set immediately before any async work
-      handleInterception(pid, name).catch(console.error)
+    logActivity(normalizedExeName.replace(/\.exe$/i, ''), isBlocked)
+
+    const isOldPid = isBlocked ? isPreExistingPid(pid, normalizedExeName) : false
+    const isApproved = isBlocked ? isPidApproved(pid) : false
+    const shouldInterceptNow = isBlocked ? shouldInterceptProcess(pid, normalizedExeName) : false
+
+    if (isBlocked) {
+      debugLog(`[WATCHER CHECK] source=primary exe=${normalizedExeName} pid=${pid} preExisting=${isOldPid} approved=${isApproved} dedupe=${shouldInterceptNow}`)
+    }
+
+    if (isBlocked && !isOldPid && !isApproved && shouldInterceptNow) {
+      handleInterception(pid, normalizedExeName).catch((error) => {
+        debugLog(`[INTERCEPT ERROR] source=primary exe=${normalizedExeName} pid=${pid} error=${String(error)}`)
+        console.error(error)
+      })
     }
   }, scriptPath)
 
-  startFallbackWatchdog(getBlockedNames(), (name) => {
-    if (!isExeOnCooldown(name)) {
-      exec(`tasklist /FI "IMAGENAME eq ${name}" /FO CSV /NH`, (err: Error | null, stdout: string) => {
-        if (err) return
-        const line = stdout.trim().split('\n')[0]
-        const parts = line?.split(',')
-        const pid = parseInt(parts?.[1]?.replace(/"/g, '') ?? '0', 10)
-        if (pid && !isPreExistingPid(pid)) {
-          setExeCooldown(name)
-          handleInterception(pid, name).catch(console.error)
-        }
+  startForegroundWatcher((current, previous) => {
+    if (isSystemProcess(current.name) || !isRealApp(current.name)) {
+      currentForegroundAppName = null
+      return
+    }
+
+    const cleanName = current.name.replace(/\.exe$/i, '')
+    const isBlocked = getBlockedNames().has(current.name)
+    currentForegroundAppName = cleanName
+    logActivity(cleanName, isBlocked)
+
+    if (!isBlocked) return
+
+    pruneApprovedPids()
+    const isOldPid = isPreExistingPid(current.pid, current.name)
+    const isApproved = isPidApproved(current.pid)
+    const shouldInterceptNow = shouldInterceptProcess(current.pid, current.name)
+    debugLog(`[WATCHER CHECK] source=foreground exe=${current.name} pid=${current.pid} preExisting=${isOldPid} approved=${isApproved} dedupe=${shouldInterceptNow}`)
+    if (isOldPid) return
+    if (isApproved) return
+    if (!shouldInterceptNow) return
+
+    handleInterception(current.pid, current.name).catch((error) => {
+      debugLog(`[INTERCEPT ERROR] source=foreground exe=${current.name} pid=${current.pid} error=${String(error)}`)
+      console.error(error)
+    })
+  }, scriptPath)
+
+  startFallbackWatchdog(getBlockedNames, (pid, name) => {
+    pruneApprovedPids()
+    const isOldPid = isPreExistingPid(pid, name)
+    const isApproved = isPidApproved(pid)
+    const shouldInterceptNow = shouldInterceptProcess(pid, name)
+    debugLog(`[WATCHER CHECK] source=fallback exe=${name} pid=${pid} preExisting=${isOldPid} approved=${isApproved} dedupe=${shouldInterceptNow}`)
+    if (!isOldPid && !isApproved && shouldInterceptNow) {
+      handleInterception(pid, name).catch((error) => {
+        debugLog(`[INTERCEPT ERROR] source=fallback exe=${name} pid=${pid} error=${String(error)}`)
+        console.error(error)
       })
     }
   })
 
-
   mainWindow = createMainWindow()
 
- function showMainWindow() {
+  function showMainWindow() {
     if (!mainWindow || mainWindow.isDestroyed()) {
       mainWindow = createMainWindow()
       return
@@ -397,7 +382,6 @@ app.whenReady().then(async () => {
     mainWindow.show()
     mainWindow.focus()
   }
-
 
   initTray(
     store,
@@ -413,8 +397,6 @@ app.whenReady().then(async () => {
     }
   )
 
-
-  
   registerIpcHandlers(store, () => modalWindow, (settings) => {
     mainWindow?.webContents.send(IPC.SETTINGS_UPDATED, settings)
   })
@@ -422,14 +404,16 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  // Don't quit on window close — live in tray
+  // Live in tray when the window is closed.
 })
 
 app.on('before-quit', () => {
   stopDailyScreenTimeTimer()
   stopAppUsageTimer()
+  flushPendingPersist()
   destroyTray()
   stopWmiWatcher()
+  stopForegroundWatcher()
   stopFallbackWatchdog()
 })
 
