@@ -83,7 +83,7 @@ export function IntentionModal({ payload, settings }: IntentionModalProps) {
         position: 'relative',
       }}>
         {/* App icon + name */}
-        <div style={{ textAlign: 'center' }}>
+        <div style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center'}}>
           {payload.icon ? (
             <img
               src={payload.icon}
