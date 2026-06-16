@@ -45,13 +45,18 @@ export function Activity() {
   const today = new Date().toLocaleDateString('en-CA')
   const [dayData, setDayData] = useState<ActivityForDateResult | null>(null)
 
-  const loadData = () => {
+  const loadData = (background = false) => {
+    if (!background) {
+      setLoading(true)
+    }
     window.electronAPI.getActivity().then(d => {
       setData(d)
-      setLoading(false)
-      // Fetch icons for all apps
       if (d.apps.length > 0) {
         window.electronAPI.getActivityIcons(d.apps.map(a => a.app_name.replace(/\.exe$/i, ''))).then(setIcons)
+      }
+    }).finally(() => {
+      if (!background) {
+        setLoading(false)
       }
     })
   }
@@ -80,7 +85,10 @@ export function Activity() {
   }, [loadDayData])
 
   useEffect(() => {
-    const interval = setInterval(loadDayData, 15000)
+    const interval = setInterval(() => {
+      loadData(true)
+      loadDayData()
+    }, 60000)
     return () => clearInterval(interval)
   }, [loadDayData])
 
@@ -113,16 +121,21 @@ export function Activity() {
   if (loading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)' }}>
-        Loading activity…
+        Loading activity...
       </div>
     )
   }
 
-  if (!data || (data.apps.length === 0 && data.dailyUsage.length === 0)) {
+  const hasAnyActivity =
+    (data?.apps.length ?? 0) > 0 ||
+    (data?.dailyUsage.length ?? 0) > 0 ||
+    (dayData?.apps.length ?? 0) > 0
+
+  if (!hasAnyActivity) {
     return (
-      <div style={{ textAlign: 'center', padding: 60, color: 'var(--text-muted)' }}>
-        <div style={{ fontSize: 36, marginBottom: 12, color: 'var(--text-muted)' }}><IoBarChartOutline /></div>
-        No activity data yet
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)', gap: 12 }}>
+        <div style={{ fontSize: 36, color: 'var(--text-muted)' }}><IoBarChartOutline /></div>
+        <div style={{ fontSize: 14 }}>Collecting data</div>
       </div>
     )
   }
@@ -131,7 +144,6 @@ export function Activity() {
 
   return (
     <div style={{ overflowY: 'auto', height: '100%', padding: '4px 24px 24px' }}>
-      {/* Date Navigation Header */}
       <div className="text-center mb-4 px-1">
         <h2 className="text-sm font-semibold tracking-widest text-zinc-400">APP USAGE</h2>
         <p className={`text-xs mt-0.5 ${
@@ -142,12 +154,10 @@ export function Activity() {
         </p>
       </div>
 
-      {/* App count */}
       <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>
         {dayData?.apps.length || 0} apps tracked
       </div>
 
-      {/* Scrollable app list */}
       <div style={{
         maxHeight: 'calc(100vh - 340px)',
         overflowY: 'auto',
@@ -173,7 +183,7 @@ export function Activity() {
                         ? 'bg-zinc-600/90 text-zinc-100 hover:bg-zinc-500 hover:text-white shadow-sm'
                         : 'bg-zinc-300/60 text-zinc-300 cursor-not-allowed'
                     }`}
-                    style={{ border: 'none', paddingTop: "1px", paddingRight: "1px"}}
+                    style={{ border: 'none', paddingTop: '1px', paddingRight: '1px' }}
                     title="Previous day"
                   >
                     <IoChevronBack size={14} />
@@ -194,7 +204,7 @@ export function Activity() {
                         ? 'bg-zinc-600/90 text-zinc-100 hover:bg-zinc-500 hover:text-white shadow-sm'
                         : 'bg-zinc-300/60 text-zinc-300 cursor-not-allowed'
                     }`}
-                    style={{ border: 'none', paddingTop: "1px", paddingLeft: "2px" }}
+                    style={{ border: 'none', paddingTop: '1px', paddingLeft: '2px' }}
                     title="Next day"
                   >
                     <IoChevronForward size={14} />
@@ -212,7 +222,6 @@ export function Activity() {
                     onMouseLeave={() => setHoveredRow(null)}
                     style={{ position: 'relative' }}
                   >
-                    {/* Icon cell */}
                     <td style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)', width: 44 }}>
                       {icons[cleanName] ? (
                         <img src={icons[cleanName]} alt="" style={{ width: 22, height: 22, borderRadius: 4 }} />
@@ -222,15 +231,12 @@ export function Activity() {
                         </div>
                       )}
                     </td>
-                    {/* App name */}
                     <td style={{ padding: '10px 12px', fontSize: 13, fontWeight: 500, textAlign: 'left', borderBottom: '1px solid var(--border)' }}>
                       {cleanName}
                     </td>
-                    {/* Time spent */}
                     <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--accent-bright)', borderBottom: '1px solid var(--border)' }}>
                       {formatDuration(app.total_seconds)}
                     </td>
-                    {/* Hide button - only visible on hover */}
                     <td style={{ padding: '10px 8px', borderBottom: '1px solid var(--border)', width: 36, textAlign: 'center' }}>
                       {hoveredRow === app.app_name && (
                         <button
@@ -265,10 +271,9 @@ export function Activity() {
         )}
       </div>
 
-      {/* Bar chart */}
       <ChartCard title="DAILY USAGE (LAST 30 DAYS)">
         <ResponsiveContainer width="100%" height={200}>
-          <BarChart data={data.dailyUsage} margin={{ left: -8, right: 8, top: 4, bottom: 0 }}>
+          <BarChart data={data?.dailyUsage ?? []} margin={{ left: -8, right: 8, top: 4, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
             <XAxis dataKey="date" tick={{ fill: 'var(--text-muted)', fontSize: 10 }} tickFormatter={d => d?.slice(5)} />
             <YAxis

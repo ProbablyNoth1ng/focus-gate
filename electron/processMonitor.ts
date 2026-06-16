@@ -1,19 +1,31 @@
 import { spawn, execFile, execFileSync, ChildProcess } from 'child_process'
 import path from 'path'
 
-interface ForegroundProcessInfo {
+export interface ForegroundProcessInfo {
   pid: number
   name: string
 }
 
+export interface ActivitySample {
+  timestamp: string
+  foreground: ForegroundProcessInfo | null
+  idleMs: number
+  mediaApps: ForegroundProcessInfo[]
+}
+
 let wmiProcess: ChildProcess | null = null
 let foregroundProcess: ChildProcess | null = null
+let activitySamplerProcess: ChildProcess | null = null
 let watchdogTimer: ReturnType<typeof setInterval> | null = null
 let currentScriptPath = ''
 let currentForegroundScriptPath = ''
+let currentActivitySamplerScriptPath = ''
 let currentCallback: ((pid: number, name: string) => void) | null = null
 let currentForegroundCallback: ((current: ForegroundProcessInfo, previous: ForegroundProcessInfo | null) => void) | null = null
+let currentActivitySampleCallback: ((sample: ActivitySample) => void) | null = null
 let watchdogInFlight = false
+let hasLoggedFirstActivitySample = false
+let activitySampleParseFailures = 0
 
 function toPowerShellEncodedCommand(command: string): string {
   return Buffer.from(command, 'utf16le').toString('base64')
@@ -244,7 +256,7 @@ export function startForegroundWatcher(
 
   const ps1Path = path.join(scriptDir, 'foregroundWatcher.ps1')
 
-  foregroundProcess = spawn('powershell', [
+  foregroundProcess = spawn('powershell.exe', [
     '-NoProfile',
     '-NonInteractive',
     '-ExecutionPolicy', 'Bypass',
@@ -296,6 +308,109 @@ export function stopForegroundWatcher() {
   currentForegroundCallback = null
   foregroundProcess?.kill()
   foregroundProcess = null
+}
+
+function parseActivitySample(raw: string): ActivitySample | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<ActivitySample>
+    if (typeof parsed.timestamp !== 'string') return null
+    if (typeof parsed.idleMs !== 'number' || !Number.isFinite(parsed.idleMs)) return null
+
+    const normalizeProcess = (value: unknown): ForegroundProcessInfo | null => {
+      if (!value || typeof value !== 'object') return null
+      const candidate = value as Partial<ForegroundProcessInfo>
+      if (typeof candidate.pid !== 'number' || !Number.isFinite(candidate.pid)) return null
+      if (typeof candidate.name !== 'string') return null
+      const name = normalizeExeName(candidate.name)
+      if (!name) return null
+      return { pid: candidate.pid, name }
+    }
+
+    const foreground = normalizeProcess(parsed.foreground)
+    const mediaApps = Array.isArray(parsed.mediaApps)
+      ? parsed.mediaApps
+          .map((item) => normalizeProcess(item))
+          .filter((item): item is ForegroundProcessInfo => item !== null)
+      : []
+
+    return {
+      timestamp: parsed.timestamp,
+      foreground,
+      idleMs: parsed.idleMs,
+      mediaApps,
+    }
+  } catch {
+    return null
+  }
+}
+
+export function startActivitySampler(
+  onSample: (sample: ActivitySample) => void,
+  scriptDir: string
+) {
+  stopActivitySampler()
+  currentActivitySamplerScriptPath = scriptDir
+  currentActivitySampleCallback = onSample
+  hasLoggedFirstActivitySample = false
+  activitySampleParseFailures = 0
+
+  const ps1Path = path.join(scriptDir, 'activitySampler.ps1')
+  activitySamplerProcess = spawn('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', ps1Path,
+  ])
+
+  let buffer = ''
+
+  activitySamplerProcess.stdout?.on('data', (chunk: Buffer) => {
+    buffer += chunk.toString()
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      const sample = parseActivitySample(trimmed)
+      if (!sample) {
+        activitySampleParseFailures += 1
+        if (activitySampleParseFailures <= 3 || activitySampleParseFailures % 20 === 0) {
+          console.warn(`[ACTIVITY] Failed to parse sampler output #${activitySampleParseFailures}: ${trimmed.slice(0, 240)}`)
+        }
+        continue
+      }
+      if (!hasLoggedFirstActivitySample) {
+        hasLoggedFirstActivitySample = true
+        console.log('[ACTIVITY] First valid sample received')
+      }
+      onSample(sample)
+    }
+  })
+
+  activitySamplerProcess.stderr?.on('data', (data: Buffer) => {
+    const text = data.toString()
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      console.error(`[ACTIVITY] stderr: ${trimmed}`)
+    }
+  })
+
+  activitySamplerProcess.on('exit', (code) => {
+    console.log(`[ACTIVITY] Sampler exited with code ${code}`)
+    if (code !== 0 && code !== null && currentActivitySampleCallback) {
+      setTimeout(() => startActivitySampler(currentActivitySampleCallback!, currentActivitySamplerScriptPath), 2000)
+    }
+  })
+
+  console.log('[ACTIVITY] Sampler started, script:', ps1Path)
+}
+
+export function stopActivitySampler() {
+  currentActivitySampleCallback = null
+  activitySamplerProcess?.kill()
+  activitySamplerProcess = null
 }
 
 export function startFallbackWatchdog(

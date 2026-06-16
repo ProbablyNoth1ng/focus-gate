@@ -6,12 +6,15 @@ import {
 import path from 'path'
 import Store from 'electron-store'
 import { AppSettings, DEFAULT_SETTINGS, IPC, InterceptionPayload } from '../shared/ipc-types'
-import { initDatabase, logActivity, logInterceptionResult, accumulateUsage, startDailyScreenTimeTimer, stopDailyScreenTimeTimer, flushPendingPersist } from './database'
+import { initDatabase, logActivity, logInterceptionResult, accumulateUsage, accumulateDailyScreenTime, flushPendingPersist } from './database'
 import {
+  ActivitySample,
   startWmiWatcher,
   startForegroundWatcher,
+  startActivitySampler,
   stopWmiWatcher,
   stopForegroundWatcher,
+  stopActivitySampler,
   startFallbackWatchdog,
   stopFallbackWatchdog,
   isSystemProcess,
@@ -35,28 +38,16 @@ let modalWindow: BrowserWindow | null = null
 let intercepting = false
 let startupGraceUntil = 0
 let currentInterception: InterceptionPayload | null = null
-
-let appUsageTimer: ReturnType<typeof setInterval> | null = null
+let lastActivitySampleAt: number | null = null
+let lastActivitySampleReceivedAt: number | null = null
+let activitySamplerStartedAt: number | null = null
+let hasLoggedActivityCollectionLive = false
+let activityFallbackEnabled = false
+let activityFallbackTimer: ReturnType<typeof setInterval> | null = null
 let currentForegroundAppName: string | null = null
 
-function tickAppUsage(): void {
-  if (!currentForegroundAppName) return
-  accumulateUsage(currentForegroundAppName)
-}
-
-function startAppUsageTimer(): void {
-  if (appUsageTimer) return
-  appUsageTimer = setInterval(tickAppUsage, 60_000)
-  console.log('[USAGE] Periodic app-usage timer started (60 s interval)')
-}
-
-function stopAppUsageTimer(): void {
-  if (!appUsageTimer) return
-  tickAppUsage()
-  clearInterval(appUsageTimer)
-  appUsageTimer = null
-  console.log('[USAGE] Periodic app-usage timer stopped')
-}
+const ACTIVITY_SAMPLER_STALE_MS = 15_000
+const ACTIVITY_FALLBACK_TICK_MS = 5_000
 
 const isDev = !app.isPackaged
 
@@ -92,6 +83,86 @@ function getBlockedAppForExe(exeName: string): AppSettings['blockedApps'][number
   return settings.blockedApps.find(
     (blockedApp) => blockedApp.enabled && normalizeExeName(path.basename(blockedApp.exePath)) === normalizedExeName
   )
+}
+
+function setActivityFallbackEnabled(enabled: boolean, reason: string): void {
+  if (activityFallbackEnabled === enabled) return
+  activityFallbackEnabled = enabled
+  const state = enabled ? 'enabled' : 'disabled'
+  console.log(`[${ts()}] [ACTIVITY] Foreground fallback ${state} (${reason})`)
+  debugLog(`[ACTIVITY FALLBACK] state=${state} reason=${reason}`)
+}
+
+function startActivityFallbackTimer(): void {
+  if (activityFallbackTimer) return
+
+  let lastTickAt = Date.now()
+  activityFallbackTimer = setInterval(() => {
+    const now = Date.now()
+    const elapsedSeconds = Math.max(1, Math.min(10, Math.round((now - lastTickAt) / 1000)))
+    lastTickAt = now
+
+    const lastSampleAt = lastActivitySampleReceivedAt ?? activitySamplerStartedAt
+    const samplerIsStale = !lastSampleAt || now - lastSampleAt > ACTIVITY_SAMPLER_STALE_MS
+
+    if (samplerIsStale) {
+      const reason = lastActivitySampleReceivedAt === null
+        ? 'waiting for first sample'
+        : `no sample for ${Math.round((now - lastActivitySampleReceivedAt) / 1000)}s`
+      setActivityFallbackEnabled(true, reason)
+    } else {
+      setActivityFallbackEnabled(false, 'sampler healthy')
+    }
+
+    if (!activityFallbackEnabled || !currentForegroundAppName) return
+
+    accumulateUsage(currentForegroundAppName, elapsedSeconds)
+    accumulateDailyScreenTime(elapsedSeconds)
+  }, ACTIVITY_FALLBACK_TICK_MS)
+
+  activityFallbackTimer.unref?.()
+}
+
+function stopActivityFallbackTimer(): void {
+  if (!activityFallbackTimer) return
+  clearInterval(activityFallbackTimer)
+  activityFallbackTimer = null
+}
+
+function trackActivitySample(sample: ActivitySample): void {
+  const sampledAt = Date.parse(sample.timestamp)
+  if (!Number.isFinite(sampledAt)) return
+
+  if (lastActivitySampleAt === null) {
+    lastActivitySampleAt = sampledAt
+    return
+  }
+
+  const elapsedSeconds = Math.max(1, Math.min(10, Math.round((sampledAt - lastActivitySampleAt) / 1000)))
+  lastActivitySampleAt = sampledAt
+
+  const trackedApps = new Set<string>()
+
+  const addTrackedApp = (name: string | null | undefined) => {
+    if (!name) return
+    if (isSystemProcess(name) || !isRealApp(name)) return
+    trackedApps.add(name.replace(/\.exe$/i, '').toLowerCase())
+  }
+
+  if (sample.foreground && sample.idleMs <= 120_000) {
+    addTrackedApp(sample.foreground.name)
+  }
+
+  for (const mediaApp of sample.mediaApps) {
+    addTrackedApp(mediaApp.name)
+  }
+
+  if (trackedApps.size === 0) return
+
+  for (const appName of trackedApps) {
+    accumulateUsage(appName, elapsedSeconds)
+  }
+  accumulateDailyScreenTime(elapsedSeconds)
 }
 
 async function handleInterception(pid: number, exeName: string): Promise<void> {
@@ -265,8 +336,6 @@ function registerModalIpc(): void {
 app.whenReady().then(async () => {
   try {
     await initDatabase()
-    startDailyScreenTimeTimer()
-    startAppUsageTimer()
     debugLog(`[APP READY] debug-log=${getDebugLogPath()}`)
   } catch (err) {
     console.error('[DB] Failed to initialize database:', err)
@@ -296,6 +365,8 @@ app.whenReady().then(async () => {
   )
 
   startupGraceUntil = Date.now() + 5000
+  activitySamplerStartedAt = Date.now()
+  startActivityFallbackTimer()
 
   startWmiWatcher((pid, name) => {
     if (isSystemProcess(name)) return
@@ -329,15 +400,15 @@ app.whenReady().then(async () => {
     }
   }, scriptPath)
 
-  startForegroundWatcher((current, previous) => {
+  startForegroundWatcher((current) => {
     if (isSystemProcess(current.name) || !isRealApp(current.name)) {
       currentForegroundAppName = null
       return
     }
 
     const cleanName = current.name.replace(/\.exe$/i, '')
-    const isBlocked = getBlockedNames().has(current.name)
     currentForegroundAppName = cleanName
+    const isBlocked = getBlockedNames().has(current.name)
     logActivity(cleanName, isBlocked)
 
     if (!isBlocked) return
@@ -355,6 +426,19 @@ app.whenReady().then(async () => {
       debugLog(`[INTERCEPT ERROR] source=foreground exe=${current.name} pid=${current.pid} error=${String(error)}`)
       console.error(error)
     })
+  }, scriptPath)
+
+  startActivitySampler((sample) => {
+    lastActivitySampleReceivedAt = Date.now()
+    if (!hasLoggedActivityCollectionLive) {
+      hasLoggedActivityCollectionLive = true
+      console.log(`[${ts()}] [ACTIVITY] Sampler is producing data`)
+      debugLog('[ACTIVITY] sampler-live')
+    }
+    if (activityFallbackEnabled) {
+      setActivityFallbackEnabled(false, 'sampler recovered')
+    }
+    trackActivitySample(sample)
   }, scriptPath)
 
   startFallbackWatchdog(getBlockedNames, (pid, name) => {
@@ -408,12 +492,12 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  stopDailyScreenTimeTimer()
-  stopAppUsageTimer()
   flushPendingPersist()
   destroyTray()
   stopWmiWatcher()
   stopForegroundWatcher()
+  stopActivitySampler()
+  stopActivityFallbackTimer()
   stopFallbackWatchdog()
 })
 

@@ -43,7 +43,7 @@ export async function initDatabase(): Promise<void> {
     } catch (loadErr) {
       console.error('[DB] Existing database is corrupt, backing up and starting fresh:', loadErr)
       const backupPath = dbPath + '.corrupt-' + Date.now()
-      try { fs.renameSync(dbPath, backupPath) } catch { }
+      try { fs.renameSync(dbPath, backupPath) } catch {}
       db = new SQL.Database()
     }
   } else {
@@ -144,7 +144,7 @@ export function logIntention(
   wordCount: number,
   resumed: boolean
 ): void {
-  if (!db) return 
+  if (!db) return
   db.run(
     `INSERT INTO intention_logs (timestamp, app_name, exe_path, purpose, word_count, resumed)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -153,9 +153,8 @@ export function logIntention(
   persistNow()
 }
 
-// Log the outcome of an interception: 'completed' = user submitted intention, 'dismissed' = user closed modal
 export function logInterceptionResult(appName: string, outcome: 'completed' | 'dismissed'): void {
-  if (!db) return  
+  if (!db) return
   db.run(
     `INSERT INTO interception_results (timestamp, app_name, outcome) VALUES (?, ?, ?)`,
     [new Date().toISOString(), appName.toLowerCase(), outcome]
@@ -163,12 +162,11 @@ export function logInterceptionResult(appName: string, outcome: 'completed' | 'd
   persistNow()
 }
 
-
 const recentlyLoggedActivity = new Map<string, number>()
 const ACTIVITY_DEDUP_MS = 15_000
 
 export function logActivity(appName: string, isBlocked = false): void {
-  if (!db) return 
+  if (!db) return
   const key = appName.toLowerCase()
   const last = recentlyLoggedActivity.get(key)
   if (last && Date.now() - last < ACTIVITY_DEDUP_MS) return
@@ -213,8 +211,6 @@ export function getLogs(
 }
 
 export function getStats(): StatsData {
-  const now = new Date()
-
   const localMidnightUTC = (offsetDays: number): string => {
     const d = new Date()
     d.setHours(0, 0, 0, 0)
@@ -222,17 +218,15 @@ export function getStats(): StatsData {
     return d.toISOString()
   }
   const todayStart = localMidnightUTC(0)
-  const weekStart  = localMidnightUTC(-7)
+  const weekStart = localMidnightUTC(-7)
   const monthStart = localMidnightUTC(-30)
 
-
-  const launchedToday          = (queryOne<{ c: number }>('SELECT COUNT(*) as c FROM interception_results WHERE timestamp >= ?', [todayStart])?.c) ?? 0
-  const uniqueAppsEver         = (queryOne<{ c: number }>('SELECT COUNT(DISTINCT app_name) as c FROM interception_results')?.c) ?? 0
-  const interceptionsThisWeek  = (queryOne<{ c: number }>('SELECT COUNT(*) as c FROM interception_results WHERE timestamp >= ?', [weekStart])?.c) ?? 0
+  const launchedToday = (queryOne<{ c: number }>('SELECT COUNT(*) as c FROM interception_results WHERE timestamp >= ?', [todayStart])?.c) ?? 0
+  const uniqueAppsEver = (queryOne<{ c: number }>('SELECT COUNT(DISTINCT app_name) as c FROM interception_results')?.c) ?? 0
+  const interceptionsThisWeek = (queryOne<{ c: number }>('SELECT COUNT(*) as c FROM interception_results WHERE timestamp >= ?', [weekStart])?.c) ?? 0
   const completedInterceptions = (queryOne<{ c: number }>("SELECT COUNT(*) as c FROM interception_results WHERE outcome = 'completed'")?.c) ?? 0
-  const totalInterceptions     = (queryOne<{ c: number }>('SELECT COUNT(*) as c FROM interception_results')?.c) ?? 0
+  const totalInterceptions = (queryOne<{ c: number }>('SELECT COUNT(*) as c FROM interception_results')?.c) ?? 0
 
-  // Top apps = most intercepted (any outcome)
   const topApps = queryAll<{ name: string; count: number }>(`
     SELECT app_name as name, COUNT(*) as count
     FROM interception_results
@@ -241,7 +235,6 @@ export function getStats(): StatsData {
     LIMIT 10
   `)
 
-  // Hourly launches today from interception_results
   const hourlyRows = queryAll<{ hour: number; count: number }>(`
     SELECT CAST(strftime('%H', datetime(timestamp, 'localtime')) AS INTEGER) as hour, COUNT(*) as count
     FROM interception_results
@@ -256,7 +249,6 @@ export function getStats(): StatsData {
     count: hourlyMap.get(i) ?? 0,
   }))
 
-  // Daily interceptions graph = all interception results per day (last 30 days)
   const dailyRows = queryAll<{ date: string; count: number }>(`
     SELECT strftime('%Y-%m-%d', datetime(timestamp, 'localtime')) as date, COUNT(*) as count
     FROM interception_results
@@ -300,72 +292,32 @@ export function clearAll(): void {
   persistNow()
 }
 
-// ── App Usage (Activity tracking) ───────────────────────────────────────────
-const lastAccumulationByApp = new Map<string, number>()
-
-/** Set to true whenever any app is accumulated; reset by tickDailyScreenTime(). */
-let anyAppActive = false
-
-export function accumulateUsage(appName: string): void {
-  const now = Date.now()
+export function accumulateUsage(appName: string, seconds: number): void {
+  if (!db || seconds <= 0) return
   const key = appName.toLowerCase()
-  const lastTime = lastAccumulationByApp.get(key) || 0
-  // Use 55s dedup so periodic 60s timer ticks are never dropped due to drift
-  if (now - lastTime < 55_000) return
-  lastAccumulationByApp.set(key, now)
-
-  // Signal that at least one app was active in this 60s window
-  anyAppActive = true
-
-  // Use local date (not UTC) so it matches the user's calendar day,
-  // consistent with tickDailyScreenTime().
+  const increment = Math.max(1, Math.round(seconds))
   const today = new Date().toLocaleDateString('en-CA')
-  // Also write directly to app_usage so the Activity list shows apps immediately
-  // (not waiting for the 5-minute flush cycle)
+
   db.run(
-    `INSERT INTO app_usage (app_name, date, seconds) VALUES (?, ?, 60)
-     ON CONFLICT(app_name, date) DO UPDATE SET seconds = seconds + 60`,
-    [key, today]
+    `INSERT INTO app_usage (app_name, date, seconds) VALUES (?, ?, ?)
+     ON CONFLICT(app_name, date) DO UPDATE SET seconds = seconds + excluded.seconds`,
+    [key, today, increment]
   )
   schedulePersist()
 }
 
-
-// ─── Wall-clock daily screen time (independent of per-app accumulation) ──────
-// daily_screen_time tracks *wall-clock* minutes: at most +60 s per real minute
-// when at least one app was active.  This avoids inflating totals when N apps
-// are open concurrently.
-
-let dailyScreenTimeTimer: ReturnType<typeof setInterval> | null = null
-
-function tickDailyScreenTime(): void {
-  if (!anyAppActive) return          // idle — don't count
-  anyAppActive = false               // consume the flag
-
-  // Use local date (not UTC) so it matches the user's calendar day.
-  // toLocaleDateString('en-CA') yields YYYY-MM-DD in local time.
+export function accumulateDailyScreenTime(seconds: number): void {
+  if (!db || seconds <= 0) return
+  const increment = Math.max(1, Math.round(seconds))
   const today = new Date().toLocaleDateString('en-CA')
+
   db.run(
-    `INSERT INTO daily_screen_time (date, seconds) VALUES (?, 60)
-     ON CONFLICT(date) DO UPDATE SET seconds = seconds + 60`,
-    [today]
+    `INSERT INTO daily_screen_time (date, seconds) VALUES (?, ?)
+     ON CONFLICT(date) DO UPDATE SET seconds = seconds + excluded.seconds`,
+    [today, increment]
   )
   schedulePersist()
 }
-
-export function startDailyScreenTimeTimer(): void {
-  if (dailyScreenTimeTimer) return
-  dailyScreenTimeTimer = setInterval(tickDailyScreenTime, 60_000)
-}
-
-export function stopDailyScreenTimeTimer(): void {
-  tickDailyScreenTime()              // final tick
-  if (dailyScreenTimeTimer) {
-    clearInterval(dailyScreenTimeTimer)
-    dailyScreenTimeTimer = null
-  }
-}
-
 
 export function getActivityData(hiddenApps: string[] = []): { apps: { app_name: string; total_seconds: number }[]; dailyUsage: { date: string; total_seconds: number }[] } {
   if (!db) return { apps: [], dailyUsage: [] }
@@ -374,7 +326,6 @@ export function getActivityData(hiddenApps: string[] = []): { apps: { app_name: 
   const thirtyDaysAgoDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30)
   const thirtyDaysAgo = thirtyDaysAgoDate.toLocaleDateString('en-CA')
 
-  // Build a normalized set of hidden app names for filtering
   const hiddenSet = new Set(hiddenApps.map(h => h.toLowerCase().replace(/\.exe$/i, '')))
 
   const allApps = queryAll<{ app_name: string; total_seconds: number }>(
@@ -389,7 +340,6 @@ export function getActivityData(hiddenApps: string[] = []): { apps: { app_name: 
     [thirtyDaysAgo]
   )
 
-  // Filter out hidden apps
   const apps = allApps.filter(a => !hiddenSet.has(a.app_name.toLowerCase()))
 
   const dailyUsage = queryAll<{ date: string; total_seconds: number }>(
@@ -403,10 +353,8 @@ export function getActivityData(hiddenApps: string[] = []): { apps: { app_name: 
   return { apps, dailyUsage }
 }
 
-// ── Icon lookup cache ────────────────────────────────────────────────────────
-const iconCache = new Map<string, string>() // app_name → data URL
+const iconCache = new Map<string, string>()
 
-// Common install paths for apps that may not be running when icon is requested
 const COMMON_EXE_PATHS: Record<string, string[]> = {
   git: [
     'C:\\Program Files\\Git\\cmd\\git.exe',
@@ -425,7 +373,7 @@ const COMMON_EXE_PATHS: Record<string, string[]> = {
     'C:\\Program Files\\PostgreSQL\\14\\bin\\psql.exe',
   ],
   code: [
-    'C:\\Users\\' + (process.env.USERNAME) + '\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe',
+    'C:\\Users\\' + process.env.USERNAME + '\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe',
   ],
   chrome: [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -443,8 +391,7 @@ const COMMON_EXE_PATHS: Record<string, string[]> = {
 async function tryGetIconFromPath(exePath: string): Promise<string> {
   try {
     const icon = await app.getFileIcon(exePath, { size: 'normal' })
-    const dataUrl = icon.toDataURL()
-    return dataUrl
+    return icon.toDataURL()
   } catch {
     return ''
   }
@@ -455,7 +402,6 @@ export async function getAppIcon(appName: string): Promise<string> {
   if (iconCache.has(key)) return iconCache.get(key)!
 
   return new Promise((resolve) => {
-    // Step 1: Try Get-Process to find running process path
     const cmd = `powershell -NoProfile -Command "try { $p = Get-Process -Name '${key}' -ErrorAction Stop | Where-Object { $_.Path } | Select-Object -First 1 -ExpandProperty Path; if($p){ $p } else { '' } } catch { '' }"`
     exec(cmd, { timeout: 5000 }, async (err, stdout) => {
       const exePath = stdout?.trim()
@@ -466,10 +412,9 @@ export async function getAppIcon(appName: string): Promise<string> {
           iconCache.set(key, dataUrl)
           resolve(dataUrl)
           return
-        } catch { /* fall through to fallback */ }
+        } catch {}
       }
 
-      // Step 2: Try common install paths
       const commonPaths = COMMON_EXE_PATHS[key]
       if (commonPaths) {
         for (const p of commonPaths) {
@@ -482,12 +427,11 @@ export async function getAppIcon(appName: string): Promise<string> {
                 resolve(dataUrl)
                 return
               }
-            } catch { /* try next path */ }
+            } catch {}
           }
         }
       }
 
-      // Step 3: Try where.exe to locate the executable
       const whereCmd = `where.exe ${key} 2>nul`
       exec(whereCmd, { timeout: 3000 }, async (_whereErr, whereStdout) => {
         const wherePath = whereStdout?.trim().split('\n')[0]?.trim()
@@ -500,7 +444,7 @@ export async function getAppIcon(appName: string): Promise<string> {
               resolve(dataUrl)
               return
             }
-          } catch { /* fall through */ }
+          } catch {}
         }
 
         iconCache.set(key, '')
@@ -547,12 +491,12 @@ export function getActivityForDate(date: string, hiddenApps: string[]): { app_na
      ORDER BY seconds DESC`,
     [date]
   )
-  
+
   return rows
     .filter(r => !hidden.includes(r.app_name.toLowerCase()))
     .map(r => ({
       app_name: r.app_name.replace(/\.exe$/i, ''),
-      total_seconds: r.total_seconds
+      total_seconds: r.total_seconds,
     }))
 }
 

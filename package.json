@@ -16,7 +16,7 @@
     "build:electron": "tsc -p tsconfig.electron.json",
     "dist": "npm run build && electron-builder",
     "dist:portable": "npm run build && electron-builder --win portable",
-    "copy:ps1": "node -e \"const fs=require('fs');const path=require('path');fs.mkdirSync('dist/electron',{recursive:true});for(const file of ['wmiWatcher.ps1','foregroundWatcher.ps1']){fs.copyFileSync(path.join('electron',file),path.join('dist','electron',file))}\"",
+    "copy:ps1": "node -e \"const fs=require('fs');const path=require('path');fs.mkdirSync('dist/electron',{recursive:true});for(const file of ['wmiWatcher.ps1','foregroundWatcher.ps1','activitySampler.ps1']){fs.copyFileSync(path.join('electron',file),path.join('dist','electron',file))}\"",
     "fix-build": "node scripts/fix-build.js"
   },
   "dependencies": {
