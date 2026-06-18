@@ -18,6 +18,10 @@
       "to": "foregroundWatcher.ps1"
     },
     {
+      "from": "electron/activitySampler.ps1",
+      "to": "activitySampler.ps1"
+    },
+    {
       "from": "assets/pssuspend.exe",
       "to": "pssuspend.exe"
     },

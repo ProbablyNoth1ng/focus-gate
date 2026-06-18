@@ -1,5 +1,7 @@
 import { spawn, execFile, execFileSync, ChildProcess } from 'child_process'
+import fs from 'fs'
 import path from 'path'
+import { debugLog } from './debugLog'
 
 export interface ForegroundProcessInfo {
   pid: number
@@ -355,6 +357,13 @@ export function startActivitySampler(
   activitySampleParseFailures = 0
 
   const ps1Path = path.join(scriptDir, 'activitySampler.ps1')
+  if (!fs.existsSync(ps1Path)) {
+    const message = `[ACTIVITY] Sampler script missing: ${ps1Path}`
+    console.error(message)
+    debugLog(message)
+    return
+  }
+
   activitySamplerProcess = spawn('powershell.exe', [
     '-NoProfile',
     '-NonInteractive',
