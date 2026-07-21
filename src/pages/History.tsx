@@ -110,7 +110,15 @@ export function History() {
         {loading ? (
           <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>Loading…</div>
         ) : logs.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: 60, color: 'var(--text-muted)' }}>
+          <div style={{ 
+            textAlign: 'center',
+            padding: 60, 
+            color: 'var(--text-muted)' , 
+            display:'flex',
+            justifyContent:'center',
+            flexDirection:"column",
+            alignItems:"center",
+            }}>
             <div style={{ fontSize: 36, marginBottom: 12, color: 'var(--text-muted)' }}><IoDocumentTextOutline /></div>
             {search ? 'No results found' : 'No intention logs yet'}
           </div>

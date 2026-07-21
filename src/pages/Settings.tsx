@@ -179,13 +179,17 @@ export function Settings({ settings, onSave }: SettingsProps) {
 
         {settings.blockedApps.length === 0 ? (
           <div style={{
+            display:'flex',
+            justifyContent:'center',
+            flexDirection:"column",
             textAlign: 'center',
+            alignItems:"center",
             padding: '24px 0',
             color: 'var(--text-muted)',
             fontSize: 13,
           }}>
             <div style={{ fontSize: 28, marginBottom: 8, color: 'var(--text-muted)' }}><IoShieldCheckmarkOutline /></div>
-            No apps blocked yet. Click "Add App" to get started.
+            <div> No apps blocked yet. Click "Add App" to get started.</div>
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
