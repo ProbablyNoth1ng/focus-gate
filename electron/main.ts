@@ -20,12 +20,15 @@ import {
   isSystemProcess,
   isRealApp,
   shouldInterceptProcess,
-  excludeExistingPids,
-  isPreExistingPid,
-  releasePreExistingPid,
+  excludeExistingApplicationSession,
   normalizeExeName,
 } from './processMonitor'
-import { suspendProcess, resumeProcess, cancelInterception, isPidApproved, pruneApprovedPids } from './interception'
+import { suspendProcess, resumeProcess, cancelInterception } from './interception'
+import {
+  applicationSessionRegistry,
+  startApplicationSessionTracking,
+  stopApplicationSessionTracking,
+} from './applicationSessionRegistry'
 import { initTray, destroyTray } from './tray'
 import { registerIpcHandlers } from './ipcHandlers'
 import { setAutostart } from './autostart'
@@ -83,6 +86,13 @@ function getBlockedAppForExe(exeName: string): AppSettings['blockedApps'][number
   return settings.blockedApps.find(
     (blockedApp) => blockedApp.enabled && normalizeExeName(path.basename(blockedApp.exePath)) === normalizedExeName
   )
+}
+
+function shouldInterceptCandidate(pid: number, exeName: string, watcherSource: string): boolean {
+  const sessionSource = applicationSessionRegistry.claimIfActive(exeName, pid)
+  const shouldInterceptNow = sessionSource === null && shouldInterceptProcess(pid, exeName)
+  debugLog(`[WATCHER CHECK] source=${watcherSource} exe=${exeName} pid=${pid} session=${sessionSource ?? 'none'} dedupe=${shouldInterceptNow}`)
+  return shouldInterceptNow
 }
 
 function setActivityFallbackEnabled(enabled: boolean, reason: string): void {
@@ -361,19 +371,18 @@ app.whenReady().then(async () => {
   await Promise.all(
     startupSettings.blockedApps
       .filter((blockedApp) => blockedApp.enabled)
-      .map((blockedApp) => excludeExistingPids(path.basename(blockedApp.exePath)))
+      .map((blockedApp) => excludeExistingApplicationSession(path.basename(blockedApp.exePath)))
   )
 
+  startApplicationSessionTracking()
   startupGraceUntil = Date.now() + 5000
   activitySamplerStartedAt = Date.now()
   startActivityFallbackTimer()
 
   startWmiWatcher((pid, name) => {
+    applicationSessionRegistry.recordProcessStart(pid)
     if (isSystemProcess(name)) return
     if (!isRealApp(name)) return
-
-    releasePreExistingPid(pid)
-    pruneApprovedPids()
 
     const normalizedExeName = normalizeExeName(name)
     const blockedApp = getBlockedAppForExe(normalizedExeName)
@@ -384,15 +393,7 @@ app.whenReady().then(async () => {
 
     logActivity(normalizedExeName.replace(/\.exe$/i, ''), isBlocked)
 
-    const isOldPid = isBlocked ? isPreExistingPid(pid, normalizedExeName) : false
-    const isApproved = isBlocked ? isPidApproved(pid) : false
-    const shouldInterceptNow = isBlocked ? shouldInterceptProcess(pid, normalizedExeName) : false
-
-    if (isBlocked) {
-      debugLog(`[WATCHER CHECK] source=primary exe=${normalizedExeName} pid=${pid} preExisting=${isOldPid} approved=${isApproved} dedupe=${shouldInterceptNow}`)
-    }
-
-    if (isBlocked && !isOldPid && !isApproved && shouldInterceptNow) {
+    if (isBlocked && shouldInterceptCandidate(pid, normalizedExeName, 'primary')) {
       handleInterception(pid, normalizedExeName).catch((error) => {
         debugLog(`[INTERCEPT ERROR] source=primary exe=${normalizedExeName} pid=${pid} error=${String(error)}`)
         console.error(error)
@@ -413,14 +414,7 @@ app.whenReady().then(async () => {
 
     if (!isBlocked) return
 
-    pruneApprovedPids()
-    const isOldPid = isPreExistingPid(current.pid, current.name)
-    const isApproved = isPidApproved(current.pid)
-    const shouldInterceptNow = shouldInterceptProcess(current.pid, current.name)
-    debugLog(`[WATCHER CHECK] source=foreground exe=${current.name} pid=${current.pid} preExisting=${isOldPid} approved=${isApproved} dedupe=${shouldInterceptNow}`)
-    if (isOldPid) return
-    if (isApproved) return
-    if (!shouldInterceptNow) return
+    if (!shouldInterceptCandidate(current.pid, current.name, 'foreground')) return
 
     handleInterception(current.pid, current.name).catch((error) => {
       debugLog(`[INTERCEPT ERROR] source=foreground exe=${current.name} pid=${current.pid} error=${String(error)}`)
@@ -442,12 +436,7 @@ app.whenReady().then(async () => {
   }, scriptPath)
 
   startFallbackWatchdog(getBlockedNames, (pid, name) => {
-    pruneApprovedPids()
-    const isOldPid = isPreExistingPid(pid, name)
-    const isApproved = isPidApproved(pid)
-    const shouldInterceptNow = shouldInterceptProcess(pid, name)
-    debugLog(`[WATCHER CHECK] source=fallback exe=${name} pid=${pid} preExisting=${isOldPid} approved=${isApproved} dedupe=${shouldInterceptNow}`)
-    if (!isOldPid && !isApproved && shouldInterceptNow) {
+    if (shouldInterceptCandidate(pid, name, 'fallback')) {
       handleInterception(pid, name).catch((error) => {
         debugLog(`[INTERCEPT ERROR] source=fallback exe=${name} pid=${pid} error=${String(error)}`)
         console.error(error)
@@ -493,6 +482,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   flushPendingPersist()
+  stopApplicationSessionTracking()
   destroyTray()
   stopWmiWatcher()
   stopForegroundWatcher()

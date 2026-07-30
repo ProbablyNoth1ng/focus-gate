@@ -1,7 +1,9 @@
-import { exec } from 'child_process'
+import { exec, spawn } from 'child_process'
 import { shell } from 'electron'
 import path from 'path'
 import { promisify } from 'util'
+import { applicationSessionRegistry } from './applicationSessionRegistry'
+import { getRunningPids } from './processMonitor'
 
 const execAsync = promisify(exec)
 
@@ -12,37 +14,16 @@ interface SuspendedProcess {
 }
 
 const suspendedProcesses = new Map<string, SuspendedProcess>()
-const approvedPids = new Map<number, string>()
 
 function getPsSuspendPath(resourcesPath: string): string {
   return path.join(resourcesPath, 'pssuspend.exe')
 }
 
-function markPidApproved(pid: number, exePath: string): void {
-  approvedPids.set(pid, exePath.toLowerCase())
-  console.log(`[${new Date().toLocaleTimeString()}] [APPROVED] pid=${pid} exe=${path.basename(exePath).toLowerCase()}`)
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
-
-export function pruneApprovedPids(): void {
-  for (const [pid] of approvedPids) {
-    if (!isProcessAlive(pid)) {
-      approvedPids.delete(pid)
-    }
-  }
-}
-
-export function isPidApproved(pid: number): boolean {
-  pruneApprovedPids()
-  return approvedPids.has(pid)
+async function approveApplicationSession(exePath: string, initialPids: number[]): Promise<void> {
+  const exeName = path.basename(exePath)
+  applicationSessionRegistry.startSession(exeName, initialPids, 'approved')
+  const runningPids = await getRunningPids(exeName)
+  applicationSessionRegistry.startSession(exeName, runningPids, 'approved')
 }
 
 export async function suspendProcess(
@@ -79,25 +60,22 @@ export async function resumeProcess(
   }
 
   if (proc.suspended) {
-    markPidApproved(proc.pid, exePath)
+    await approveApplicationSession(exePath, [proc.pid])
     try {
       const psSuspend = getPsSuspendPath(resourcesPath)
       await execAsync(`"${psSuspend}" -accepteula -r ${proc.pid}`)
       console.log(`[${new Date().toLocaleTimeString()}] [RESUME] pid=${proc.pid} exe=${exePath}`)
     } catch {
-      approvedPids.delete(proc.pid)
       console.log(`[${new Date().toLocaleTimeString()}] [RESUME] pid=${proc.pid} already gone, skipping relaunch`)
     }
   } else {
     try {
-      const child = require('child_process').spawn(exePath, [], {
+      const child = spawn(exePath, [], {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
       })
-      if (child.pid) {
-        markPidApproved(child.pid, exePath)
-      }
+      await approveApplicationSession(exePath, child.pid ? [child.pid] : [])
       child.unref()
       console.log(`[${new Date().toLocaleTimeString()}] [RELAUNCH] pid=${child.pid ?? 'unknown'} exe=${exePath}`)
     } catch (err) {

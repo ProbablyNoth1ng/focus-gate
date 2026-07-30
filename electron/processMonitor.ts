@@ -1,6 +1,7 @@
-import { spawn, execFile, execFileSync, ChildProcess } from 'child_process'
+import { spawn, execFile, ChildProcess } from 'child_process'
 import fs from 'fs'
 import path from 'path'
+import { applicationSessionRegistry } from './applicationSessionRegistry'
 import { debugLog } from './debugLog'
 
 export interface ForegroundProcessInfo {
@@ -103,7 +104,6 @@ const SYSTEM_NOISE = new Set([
 ])
 
 const recentlyIntercepted = new Map<string, number>()
-const preExistingPids = new Map<number, { exeName: string; creationDate: string }>()
 
 export function normalizeExeName(name: string): string {
   const trimmed = name.trim().toLowerCase()
@@ -138,59 +138,26 @@ export function resetInterceptCooldown(pid: number, name: string): void {
   recentlyIntercepted.delete(`${normalizeExeName(name)}#${pid}`)
 }
 
-export function excludeExistingPids(exeName: string): Promise<void> {
+export function getRunningPids(exeName: string): Promise<number[]> {
   return new Promise((resolve) => {
     const normalizedExeName = normalizeExeName(exeName)
-    const processName = normalizedExeName.replace(/\.exe$/i, '')
-    const psCommand = `$items = Get-Process -Name '${processName}' -ErrorAction SilentlyContinue; foreach ($item in $items) { if ($item.StartTime) { Write-Output "$($item.Id)|$($item.StartTime.ToUniversalTime().ToString('o'))" } }`
+    const processName = normalizedExeName.replace(/\.exe$/i, '').replace(/'/g, "''")
+    const psCommand = `$items = Get-Process -Name '${processName}' -ErrorAction SilentlyContinue; foreach ($item in $items) { if ($item.Id) { Write-Output $item.Id } }`
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', toPowerShellEncodedCommand(psCommand)], (err, stdout) => {
-      if (!err) {
-        for (const line of stdout.trim().split('\n')) {
-          const trimmed = line.trim()
-          if (!trimmed) continue
-          const [pidStr, creationDate] = trimmed.split('|')
-          const pid = parseInt(pidStr, 10)
-          if (pid && creationDate) {
-            preExistingPids.set(pid, { exeName: normalizedExeName, creationDate: creationDate.trim() })
-          }
-        }
-      }
-      resolve()
+      if (err) return resolve([])
+      const pids = stdout
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => parseInt(line.trim(), 10))
+        .filter((pid) => Number.isInteger(pid) && pid > 0)
+      resolve(pids)
     })
   })
 }
 
-export function isPreExistingPid(pid: number, exeName?: string): boolean {
-  const tracked = preExistingPids.get(pid)
-  if (!tracked) return false
-
-  const normalizedExeName = exeName ? normalizeExeName(exeName) : tracked.exeName
-  if (tracked.exeName !== normalizedExeName) {
-    preExistingPids.delete(pid)
-    return false
-  }
-
-  try {
-    const psCommand = `$item = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($item -and $item.StartTime) { Write-Output $item.StartTime.ToUniversalTime().ToString('o') }`
-    const currentCreationDate = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', toPowerShellEncodedCommand(psCommand)], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-      encoding: 'utf8',
-    }).trim()
-
-    if (!currentCreationDate || currentCreationDate !== tracked.creationDate) {
-      preExistingPids.delete(pid)
-      return false
-    }
-  } catch {
-    preExistingPids.delete(pid)
-    return false
-  }
-
-  return true
-}
-
-export function releasePreExistingPid(pid: number): void {
-  preExistingPids.delete(pid)
+export async function excludeExistingApplicationSession(exeName: string): Promise<void> {
+  const pids = await getRunningPids(exeName)
+  applicationSessionRegistry.startSession(exeName, pids, 'pre-existing')
 }
 
 export function startWmiWatcher(

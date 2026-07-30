@@ -19,7 +19,7 @@ import {
 } from './database'
 import { setAutostart } from './autostart'
 import { setTrayPaused } from './tray'
-import { excludeExistingPids } from './processMonitor'
+import { excludeExistingApplicationSession } from './processMonitor'
 
 
 export function registerIpcHandlers(
@@ -48,7 +48,7 @@ export function registerIpcHandlers(
         if (app.enabled && !wasAlreadyEnabled) {
           // Newly added or just enabled — snapshot all currently running instances
           const exeName = path.basename(app.exePath)
-          await excludeExistingPids(exeName)
+          await excludeExistingApplicationSession(exeName)
         }
       }
     }
