@@ -6,7 +6,7 @@ import {
 import path from 'path'
 import Store from 'electron-store'
 import { AppSettings, DEFAULT_SETTINGS, IPC, InterceptionPayload } from '../shared/ipc-types'
-import { initDatabase, logActivity, logInterceptionResult, accumulateUsage, accumulateDailyScreenTime, flushPendingPersist } from './database'
+import { initDatabase, logActivity, logInterceptionResult, accumulateUsage, accumulateDailyScreenTime, accumulateChromeTabUsage, flushPendingPersist } from './database'
 import {
   ActivitySample,
   startWmiWatcher,
@@ -33,6 +33,7 @@ import { initTray, destroyTray } from './tray'
 import { registerIpcHandlers } from './ipcHandlers'
 import { setAutostart } from './autostart'
 import { debugLog, getDebugLogPath } from './debugLog'
+import { deriveChromeTabIdentity } from './chromeTabIdentity'
 
 const store = new Store<AppSettings>({ defaults: DEFAULT_SETTINGS })
 
@@ -65,6 +66,12 @@ const resourcesPath = isDev
 function ts() {
   const d = new Date()
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
+}
+
+function localDateFromTimestamp(timestamp: string): string {
+  const parsed = new Date(timestamp)
+  if (Number.isNaN(parsed.getTime())) return new Date().toLocaleDateString('en-CA')
+  return parsed.toLocaleDateString('en-CA')
 }
 
 function isInFocusHours(): boolean {
@@ -173,6 +180,18 @@ function trackActivitySample(sample: ActivitySample): void {
     accumulateUsage(appName, elapsedSeconds)
   }
   accumulateDailyScreenTime(elapsedSeconds)
+
+  const foregroundName = sample.foreground?.name.replace(/\.exe$/i, '').toLowerCase()
+  if (foregroundName === 'chrome' && sample.idleMs <= 120_000 && sample.chromeTab) {
+    const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
+    const identity = deriveChromeTabIdentity(sample.chromeTab, settings.trackIncognitoTabs)
+    if (identity) {
+      accumulateChromeTabUsage({
+        ...identity,
+        date: localDateFromTimestamp(sample.timestamp),
+      }, elapsedSeconds)
+    }
+  }
 }
 
 async function handleInterception(pid: number, exeName: string): Promise<void> {

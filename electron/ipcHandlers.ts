@@ -15,7 +15,8 @@ import {
   logIntention,
   logInterceptionResult,
   getActivityForDate,
-  hasActivityForDate,
+  getChromeTabUsageForDate,
+  hasVisibleActivityForDate,
 } from './database'
 import { setAutostart } from './autostart'
 import { setTrayPaused } from './tray'
@@ -133,6 +134,7 @@ export function registerIpcHandlers(
   ipcMain.handle(IPC.GET_ACTIVITY_FOR_DATE, async (_event, date: string) => {
     const hiddenApps: string[] = store.get('hiddenApps', []) as string[]
     const apps = getActivityForDate(date, hiddenApps)
+    const chromeWebsites = getChromeTabUsageForDate(date)
     
     // Use Date.UTC to avoid local timezone shifting the date
     const [y, m, d] = date.split('-').map(Number)
@@ -143,8 +145,9 @@ export function registerIpcHandlers(
     
     return {
       apps,
-      hasPrevDay: hasActivityForDate(prevDateStr),
-      hasNextDay: nextDateStr <= today && hasActivityForDate(nextDateStr),
+      chromeWebsites,
+      hasPrevDay: hasVisibleActivityForDate(prevDateStr, hiddenApps),
+      hasNextDay: nextDateStr <= today && hasVisibleActivityForDate(nextDateStr, hiddenApps),
       isToday: date === today,
       selectedDate: date
     }

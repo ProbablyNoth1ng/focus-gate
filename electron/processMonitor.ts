@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { applicationSessionRegistry } from './applicationSessionRegistry'
 import { debugLog } from './debugLog'
+import type { ChromeTabObservation } from '../shared/ipc-types'
 
 export interface ForegroundProcessInfo {
   pid: number
@@ -14,6 +15,7 @@ export interface ActivitySample {
   foreground: ForegroundProcessInfo | null
   idleMs: number
   mediaApps: ForegroundProcessInfo[]
+  chromeTab: ChromeTabObservation | null
 }
 
 let wmiProcess: ChildProcess | null = null
@@ -302,11 +304,31 @@ function parseActivitySample(raw: string): ActivitySample | null {
           .filter((item): item is ForegroundProcessInfo => item !== null)
       : []
 
+    const normalizeChromeTab = (value: unknown): ChromeTabObservation | null => {
+      if (!value || typeof value !== 'object') return null
+      const candidate = value as Partial<ChromeTabObservation>
+      if (typeof candidate.title !== 'string') return null
+      if (typeof candidate.url !== 'string') return null
+      if (
+        candidate.privacyMode !== 'normal' &&
+        candidate.privacyMode !== 'incognito' &&
+        candidate.privacyMode !== 'unknown'
+      ) {
+        return null
+      }
+      return {
+        title: candidate.title,
+        url: candidate.url,
+        privacyMode: candidate.privacyMode,
+      }
+    }
+
     return {
       timestamp: parsed.timestamp,
       foreground,
       idleMs: parsed.idleMs,
       mediaApps,
+      chromeTab: normalizeChromeTab(parsed.chromeTab),
     }
   } catch {
     return null
@@ -352,7 +374,7 @@ export function startActivitySampler(
       if (!sample) {
         activitySampleParseFailures += 1
         if (activitySampleParseFailures <= 3 || activitySampleParseFailures % 20 === 0) {
-          console.warn(`[ACTIVITY] Failed to parse sampler output #${activitySampleParseFailures}: ${trimmed.slice(0, 240)}`)
+          console.warn(`[ACTIVITY] Failed to parse sampler output #${activitySampleParseFailures}`)
         }
         continue
       }

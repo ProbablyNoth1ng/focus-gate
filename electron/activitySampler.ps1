@@ -1,6 +1,8 @@
 $ErrorActionPreference = 'SilentlyContinue'
 
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
 
 Add-Type -TypeDefinition @"
 using System;
@@ -21,6 +23,9 @@ public static class FocusGateActivityInterop {
 
   [DllImport("user32.dll")]
   public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
 
   [DllImport("user32.dll")]
   public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
@@ -438,9 +443,123 @@ function Get-MediaApps {
     ForEach-Object { $_.Group[0] }
 }
 
+function Get-ForegroundWindowTitle {
+  param([IntPtr]$Hwnd)
+
+  try {
+    $builder = New-Object System.Text.StringBuilder 1024
+    [FocusGateActivityInterop]::GetWindowText($Hwnd, $builder, $builder.Capacity) | Out-Null
+    return $builder.ToString().Trim()
+  } catch {
+    return ''
+  }
+}
+
+function Get-AutomationValue {
+  param($Element)
+
+  try {
+    $pattern = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+    if ($pattern -and -not [string]::IsNullOrWhiteSpace($pattern.Current.Value)) {
+      return [string]$pattern.Current.Value
+    }
+  } catch {
+    return ''
+  }
+
+  return ''
+}
+
+function Get-ChromeAddressBarUrl {
+  param([IntPtr]$Hwnd)
+
+  try {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($Hwnd)
+    if (-not $root) {
+      return ''
+    }
+
+    $editCondition = [System.Windows.Automation.PropertyCondition]::new(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Edit
+    )
+
+    $edits = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $editCondition)
+    foreach ($edit in $edits) {
+      try {
+        $name = [string]$edit.Current.Name
+        if ($name -notmatch 'address|search|omnibox') {
+          continue
+        }
+
+        $value = Get-AutomationValue $edit
+        if ([string]::IsNullOrWhiteSpace($value)) {
+          continue
+        }
+
+        if ($value -match '^[a-zA-Z][a-zA-Z0-9+\-.]*://') {
+          return $value.Trim()
+        }
+
+        if ($value -match '^[^\s]+\.[^\s]+') {
+          return "https://$($value.Trim())"
+        }
+      } catch {
+        continue
+      }
+    }
+  } catch {
+    return ''
+  }
+
+  return ''
+}
+
+function Get-ChromePrivacyMode {
+  param(
+    [string]$Title,
+    [string]$Url
+  )
+
+  if ($Title -match '(?i)incognito') {
+    return 'incognito'
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($Url)) {
+    return 'normal'
+  }
+
+  return 'unknown'
+}
+
+function Get-ChromeTabObservation {
+  param(
+    [IntPtr]$Hwnd,
+    [string]$ProcessName
+  )
+
+  if ((Normalize-ExeName $ProcessName) -ne 'chrome.exe') {
+    return $null
+  }
+
+  try {
+    $title = Get-ForegroundWindowTitle $Hwnd
+    $url = Get-ChromeAddressBarUrl $Hwnd
+
+    return @{
+      title = $title
+      url = $url
+      privacyMode = Get-ChromePrivacyMode -Title $title -Url $url
+    }
+  } catch {
+    return $null
+  }
+}
+
 while ($true) {
   try {
     $foreground = $null
+    $chromeTab = $null
     $hwnd = [FocusGateActivityInterop]::GetForegroundWindow()
     if ($hwnd -ne [IntPtr]::Zero) {
       $foregroundPid = 0
@@ -451,6 +570,7 @@ while ($true) {
           pid = [int]$foregroundPid
           name = Normalize-ExeName $process.ProcessName
         }
+        $chromeTab = Get-ChromeTabObservation -Hwnd $hwnd -ProcessName $process.ProcessName
       }
     }
 
@@ -459,6 +579,7 @@ while ($true) {
       foreground = $foreground
       idleMs = Get-IdleMilliseconds
       mediaApps = @(Get-MediaApps)
+      chromeTab = $chromeTab
     }
 
     $sample | ConvertTo-Json -Compress -Depth 5

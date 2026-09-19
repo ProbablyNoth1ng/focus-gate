@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback } from 'react'
+import { Fragment, useState, useEffect, useCallback } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
-import type { ActivityData, ActivityForDateResult } from '../../shared/ipc-types'
-import { IoChevronBack, IoChevronForward, IoBarChartOutline, IoClose } from 'react-icons/io5'
+import type { ActivityData, ActivityForDateResult, ChromeWebsiteUsageSummary } from '../../shared/ipc-types'
+import { IoChevronBack, IoChevronForward, IoChevronDown, IoBarChartOutline, IoClose } from 'react-icons/io5'
 
 function formatDuration(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600)
@@ -44,6 +44,8 @@ export function Activity() {
   })
   const today = new Date().toLocaleDateString('en-CA')
   const [dayData, setDayData] = useState<ActivityForDateResult | null>(null)
+  const [expandedChrome, setExpandedChrome] = useState(false)
+  const [expandedWebsites, setExpandedWebsites] = useState<Set<string>>(() => new Set())
 
   const loadData = (background = false) => {
     if (!background) {
@@ -85,6 +87,11 @@ export function Activity() {
   }, [loadDayData])
 
   useEffect(() => {
+    setExpandedChrome(false)
+    setExpandedWebsites(new Set())
+  }, [selectedDate])
+
+  useEffect(() => {
     const interval = setInterval(() => {
       loadData(true)
       loadDayData()
@@ -96,6 +103,15 @@ export function Activity() {
     await window.electronAPI.hideApp(appName)
     loadDayData()
     loadData()
+  }
+
+  const toggleWebsite = (websiteKey: string) => {
+    setExpandedWebsites(prev => {
+      const next = new Set(prev)
+      if (next.has(websiteKey)) next.delete(websiteKey)
+      else next.add(websiteKey)
+      return next
+    })
   }
 
   const goToPrevDay = () => {
@@ -129,7 +145,8 @@ export function Activity() {
   const hasAnyActivity =
     (data?.apps.length ?? 0) > 0 ||
     (data?.dailyUsage.length ?? 0) > 0 ||
-    (dayData?.apps.length ?? 0) > 0
+    (dayData?.apps.length ?? 0) > 0 ||
+    (dayData?.chromeWebsites.length ?? 0) > 0
 
   if (!hasAnyActivity) {
     return (
@@ -141,6 +158,8 @@ export function Activity() {
   }
 
   const sortedApps = [...(dayData?.apps ?? [])].sort((a, b) => b.total_seconds - a.total_seconds)
+  const chromeWebsites = dayData?.chromeWebsites ?? []
+  const hasChromeBreakdown = chromeWebsites.length > 0
 
   return (
     <div style={{ overflowY: 'auto', height: '100%', padding: '4px 24px 24px' }}>
@@ -171,7 +190,13 @@ export function Activity() {
             No apps tracked on this day
           </div>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+            <colgroup>
+              <col style={{ width: 44 }} />
+              <col />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 44 }} />
+            </colgroup>
             <thead>
               <tr>
                 <th style={{ padding: '10px 8px', borderBottom: '1px solid var(--border)', width: 44, textAlign: 'center', verticalAlign: 'middle' }}>
@@ -215,55 +240,89 @@ export function Activity() {
             <tbody>
               {sortedApps.map((app) => {
                 const cleanName = app.app_name.replace(/\.exe$/i, '')
+                const isChrome = cleanName.toLowerCase() === 'chrome'
                 return (
-                  <tr
-                    key={app.app_name}
-                    onMouseEnter={() => setHoveredRow(app.app_name)}
-                    onMouseLeave={() => setHoveredRow(null)}
-                    style={{ position: 'relative' }}
-                  >
-                    <td style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)', width: 44 }}>
-                      {icons[cleanName] ? (
-                        <img src={icons[cleanName]} alt="" style={{ width: 22, height: 22, borderRadius: 4 }} />
-                      ) : (
-                        <div style={{ width: 22, height: 22, borderRadius: 4, background: 'var(--bg-active)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)' }}>
-                          {cleanName.charAt(0).toUpperCase()}
+                  <Fragment key={app.app_name}>
+                    <tr
+                      onMouseEnter={() => setHoveredRow(app.app_name)}
+                      onMouseLeave={() => setHoveredRow(null)}
+                      style={{ position: 'relative' }}
+                    >
+                      <td style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)', width: 44 }}>
+                        {icons[cleanName] ? (
+                          <img src={icons[cleanName]} alt="" style={{ width: 22, height: 22, borderRadius: 4 }} />
+                        ) : (
+                          <div style={{ width: 22, height: 22, borderRadius: 4, background: 'var(--bg-active)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)' }}>
+                            {cleanName.charAt(0).toUpperCase()}
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ padding: '10px 12px', fontSize: 13, fontWeight: 500, textAlign: 'left', borderBottom: '1px solid var(--border)' }}>
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, maxWidth: '100%' }}>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {cleanName}
+                          </span>
+                          {isChrome && hasChromeBreakdown && (
+                            <button
+                              onClick={() => setExpandedChrome(v => !v)}
+                              aria-label={expandedChrome ? 'Collapse Chrome website activity' : 'Expand Chrome website activity'}
+                              title={expandedChrome ? 'Collapse websites' : 'Expand websites'}
+                              style={{
+                                background: 'none',
+                                border: 'none',
+                                cursor: 'pointer',
+                                padding: 4,
+                                borderRadius: 4,
+                                color: 'var(--text-muted)',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                flex: '0 0 auto',
+                              }}
+                            >
+                              {expandedChrome ? <IoChevronDown size={14} /> : <IoChevronForward size={14} />}
+                            </button>
+                          )}
                         </div>
-                      )}
-                    </td>
-                    <td style={{ padding: '10px 12px', fontSize: 13, fontWeight: 500, textAlign: 'left', borderBottom: '1px solid var(--border)' }}>
-                      {cleanName}
-                    </td>
-                    <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--accent-bright)', borderBottom: '1px solid var(--border)' }}>
-                      {formatDuration(app.total_seconds)}
-                    </td>
-                    <td style={{ padding: '10px 8px', borderBottom: '1px solid var(--border)', width: 36, textAlign: 'center' }}>
-                      {hoveredRow === app.app_name && (
-                        <button
-                          onClick={() => handleHideApp(app.app_name)}
-                          title="Hide from tracking"
-                          style={{
-                            background: 'none',
-                            border: 'none',
-                            cursor: 'pointer',
-                            padding: 4,
-                            borderRadius: 4,
-                            color: 'var(--text-muted)',
-                            fontSize: 14,
-                            lineHeight: 1,
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            transition: 'color 0.15s',
-                          }}
-                          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--danger)')}
-                          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}
-                        >
-                          <IoClose style={{ fontSize: 14 }} />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
+                      </td>
+                      <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--accent-bright)', borderBottom: '1px solid var(--border)' }}>
+                        {formatDuration(app.total_seconds)}
+                      </td>
+                      <td style={{ padding: '10px 8px', borderBottom: '1px solid var(--border)', width: 36, textAlign: 'center' }}>
+                        {!isChrome && hoveredRow === app.app_name && (
+                          <button
+                            onClick={() => handleHideApp(app.app_name)}
+                            title="Hide from tracking"
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              cursor: 'pointer',
+                              padding: 4,
+                              borderRadius: 4,
+                              color: 'var(--text-muted)',
+                              fontSize: 14,
+                              lineHeight: 1,
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              transition: 'color 0.15s',
+                            }}
+                            onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--danger)')}
+                            onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}
+                          >
+                            <IoClose style={{ fontSize: 14 }} />
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                    {isChrome && hasChromeBreakdown && expandedChrome && (
+                      <ChromeWebsiteRows
+                        websites={chromeWebsites}
+                        expandedWebsites={expandedWebsites}
+                        onToggleWebsite={toggleWebsite}
+                      />
+                    )}
+                  </Fragment>
                 )
               })}
             </tbody>
@@ -292,5 +351,125 @@ export function Activity() {
         </ResponsiveContainer>
       </ChartCard>
     </div>
+  )
+}
+
+function ChromeWebsiteRows({
+  websites,
+  expandedWebsites,
+  onToggleWebsite,
+}: {
+  websites: ChromeWebsiteUsageSummary[]
+  expandedWebsites: Set<string>
+  onToggleWebsite: (websiteKey: string) => void
+}) {
+  const titleStyle: React.CSSProperties = {
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  }
+
+  return (
+    <>
+      {websites.map((website) => {
+        const hasMultiplePages = website.pages.length > 1
+        const expanded = expandedWebsites.has(website.website_key)
+        const firstPage = website.pages[0]
+
+        if (!hasMultiplePages && firstPage) {
+          return (
+            <tr key={website.website_key}>
+              <td style={{ borderBottom: '1px solid var(--border)' }} />
+              <td style={{ padding: '8px 12px 8px 28px', borderBottom: '1px solid var(--border)' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(90px, 190px) minmax(0, 1fr)', gap: 12, alignItems: 'center', minWidth: 0 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)', ...titleStyle }} title={website.website_label}>
+                    {website.website_label}
+                  </span>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)', ...titleStyle }} title={firstPage.title}>
+                    {firstPage.title}
+                  </span>
+                </div>
+              </td>
+              <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--accent-bright)', borderBottom: '1px solid var(--border)' }}>
+                {formatDuration(firstPage.total_seconds)}
+              </td>
+              <td style={{ borderBottom: '1px solid var(--border)' }} />
+            </tr>
+          )
+        }
+
+        return (
+          <Fragment key={website.website_key}>
+            <tr>
+              <td style={{ borderBottom: '1px solid var(--border)' }} />
+              <td style={{ padding: '8px 12px 8px 28px', borderBottom: '1px solid var(--border)' }}>
+                <button
+                  onClick={() => onToggleWebsite(website.website_key)}
+                  aria-label={expanded ? `Collapse ${website.website_label} pages` : `Expand ${website.website_label} pages`}
+                  title={expanded ? 'Collapse pages' : 'Expand pages'}
+                  style={{
+                    maxWidth: '100%',
+                    background: 'none',
+                    border: 'none',
+                    padding: 0,
+                    color: 'inherit',
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    gap: 6,
+                    alignItems: 'center',
+                    textAlign: 'left',
+                    minWidth: 0,
+                  }}
+                >
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)', minWidth: 0, ...titleStyle }} title={website.website_label}>
+                    {website.website_label}
+                  </span>
+                  <span style={{ color: 'var(--text-muted)', display: 'inline-flex', flex: '0 0 auto' }}>
+                    {expanded ? <IoChevronDown size={13} /> : <IoChevronForward size={13} />}
+                  </span>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    {website.pages.length}
+                  </span>
+                </button>
+              </td>
+              <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--accent-bright)', borderBottom: '1px solid var(--border)' }}>
+                {formatDuration(website.total_seconds)}
+              </td>
+              <td style={{ borderBottom: '1px solid var(--border)' }} />
+            </tr>
+            {expanded && website.pages.map((page) => (
+              <tr key={page.page_key}>
+                <td style={{ borderBottom: '1px solid var(--border)' }} />
+                <td style={{ padding: '7px 12px 7px 28px', borderBottom: '1px solid var(--border)' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'minmax(90px, 190px) minmax(0, 1fr)', gap: 12, alignItems: 'center', minWidth: 0 }}>
+                    <span />
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }} title={page.title}>
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          width: 4,
+                          height: 4,
+                          borderRadius: '50%',
+                          background: 'var(--text-muted)',
+                          opacity: 0.85,
+                          flex: '0 0 auto',
+                        }}
+                      />
+                      <span style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 0, ...titleStyle }}>
+                        {page.title}
+                      </span>
+                    </span>
+                  </div>
+                </td>
+                <td style={{ padding: '7px 12px', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--accent-bright)', borderBottom: '1px solid var(--border)' }}>
+                  {formatDuration(page.total_seconds)}
+                </td>
+                <td style={{ borderBottom: '1px solid var(--border)' }} />
+              </tr>
+            ))}
+          </Fragment>
+        )
+      })}
+    </>
   )
 }
