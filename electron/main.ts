@@ -33,7 +33,7 @@ import { initTray, destroyTray } from './tray'
 import { registerIpcHandlers } from './ipcHandlers'
 import { setAutostart } from './autostart'
 import { debugLog, getDebugLogPath } from './debugLog'
-import { deriveChromeTabIdentity } from './chromeTabIdentity'
+import { deriveChromeUsageIdentities } from './chromeTabIdentity'
 
 const store = new Store<AppSettings>({ defaults: DEFAULT_SETTINGS })
 
@@ -174,6 +174,10 @@ function trackActivitySample(sample: ActivitySample): void {
     addTrackedApp(mediaApp.name)
   }
 
+  if (sample.chromeAudibleTabs.length > 0) {
+    addTrackedApp('chrome.exe')
+  }
+
   if (trackedApps.size === 0) return
 
   for (const appName of trackedApps) {
@@ -182,10 +186,18 @@ function trackActivitySample(sample: ActivitySample): void {
   accumulateDailyScreenTime(elapsedSeconds)
 
   const foregroundName = sample.foreground?.name.replace(/\.exe$/i, '').toLowerCase()
-  if (foregroundName === 'chrome' && sample.idleMs <= 120_000 && sample.chromeTab) {
+  const focusedTab = foregroundName === 'chrome' && sample.idleMs <= 120_000
+    ? sample.chromeTab
+    : null
+  if (focusedTab || sample.chromeAudibleTabs.length > 0) {
     const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
-    const identity = deriveChromeTabIdentity(sample.chromeTab, settings.trackIncognitoTabs)
-    if (identity) {
+    const identities = deriveChromeUsageIdentities({
+      focusedTab,
+      audibleTabs: sample.chromeAudibleTabs,
+      foregroundChromeWindowId: sample.foregroundWindowId,
+      trackIncognitoTabs: settings.trackIncognitoTabs,
+    })
+    for (const identity of identities) {
       accumulateChromeTabUsage({
         ...identity,
         date: localDateFromTimestamp(sample.timestamp),

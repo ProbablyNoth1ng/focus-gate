@@ -4,6 +4,7 @@ import { exec } from 'child_process'
 import { app } from 'electron'
 import initSqlJs, { Database, SqlJsStatic } from 'sql.js'
 import type { ChromeTabIdentity, ChromeWebsiteUsageSummary, IntentionLog, StatsData } from '../shared/ipc-types'
+import { normalizeChromeWebsiteIdentityFromTitle } from './chromeTabIdentity'
 
 let db: Database
 let SQL: SqlJsStatic
@@ -159,6 +160,10 @@ function queryAll<T>(sql: string, params: (string | number)[] = []): T[] {
 function queryOne<T>(sql: string, params: (string | number)[] = []): T | undefined {
   const results = queryAll<T>(sql, params)
   return results[0]
+}
+
+function stableTitleKey(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
 export function logIntention(
@@ -376,8 +381,10 @@ export function accumulateChromeTabUsage(identity: ChromeTabIdentity & { date: s
   schedulePersist()
 }
 
-export function getChromeTabUsageForDate(date: string): ChromeWebsiteUsageSummary[] {
+export function getChromeTabUsageForDate(date: string, hiddenApps: string[] = []): ChromeWebsiteUsageSummary[] {
   if (!db) return []
+  const hidden = hiddenApps.map(h => h.toLowerCase().replace(/\.exe$/i, ''))
+  if (hidden.includes('chrome')) return []
 
   const pageRows = queryAll<{
     website_key: string
@@ -395,20 +402,35 @@ export function getChromeTabUsageForDate(date: string): ChromeWebsiteUsageSummar
 
   const byWebsite = new Map<string, ChromeWebsiteUsageSummary>()
   for (const row of pageRows) {
-    const existing = byWebsite.get(row.website_key)
+    const website = row.website_key.startsWith('host:')
+      ? { website_key: row.website_key, website_label: row.website_label }
+      : (() => {
+          const normalized = normalizeChromeWebsiteIdentityFromTitle(row.title, row.website_label)
+          return normalized
+            ? { website_key: normalized.websiteKey, website_label: normalized.websiteLabel }
+            : null
+        })()
+    if (!website) continue
+    const existing = byWebsite.get(website.website_key)
     if (existing) {
       existing.total_seconds += row.total_seconds
-      existing.pages.push({
-        page_key: row.page_key,
-        title: row.title,
-        total_seconds: row.total_seconds,
-      })
+      const pageTitleKey = stableTitleKey(row.title)
+      const existingPage = existing.pages.find(page => stableTitleKey(page.title) === pageTitleKey)
+      if (existingPage) {
+        existingPage.total_seconds += row.total_seconds
+      } else {
+        existing.pages.push({
+          page_key: row.page_key,
+          title: row.title,
+          total_seconds: row.total_seconds,
+        })
+      }
       continue
     }
 
-    byWebsite.set(row.website_key, {
-      website_key: row.website_key,
-      website_label: row.website_label,
+    byWebsite.set(website.website_key, {
+      website_key: website.website_key,
+      website_label: website.website_label,
       total_seconds: row.total_seconds,
       pages: [{
         page_key: row.page_key,
@@ -418,7 +440,15 @@ export function getChromeTabUsageForDate(date: string): ChromeWebsiteUsageSummar
     })
   }
 
-  return [...byWebsite.values()].sort((a, b) => {
+  const websites = [...byWebsite.values()]
+  for (const website of websites) {
+    website.pages.sort((left, right) => {
+      if (right.total_seconds !== left.total_seconds) return right.total_seconds - left.total_seconds
+      return left.title.localeCompare(right.title)
+    })
+  }
+
+  return websites.sort((a, b) => {
     if (b.total_seconds !== a.total_seconds) return b.total_seconds - a.total_seconds
     return a.website_label.localeCompare(b.website_label)
   })
@@ -631,5 +661,5 @@ export function hasVisibleActivityForDate(date: string, hiddenApps: string[]): b
   )
   const hasVisibleApp = appRows.some(r => !hidden.includes(r.app_name.toLowerCase()))
   if (hasVisibleApp) return true
-  return getChromeTabUsageForDate(date).length > 0
+  return getChromeTabUsageForDate(date, hiddenApps).length > 0
 }

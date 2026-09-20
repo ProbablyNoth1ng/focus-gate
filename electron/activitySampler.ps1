@@ -1,4 +1,6 @@
 $ErrorActionPreference = 'SilentlyContinue'
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 Add-Type -AssemblyName UIAutomationClient
@@ -556,12 +558,124 @@ function Get-ChromeTabObservation {
   }
 }
 
+$hadAudibleChromeTabs = $false
+
+function Test-ChromeTabSelected {
+  param($Tab)
+
+  try {
+    $pattern = $Tab.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    if ($pattern) {
+      return [bool]$pattern.Current.IsSelected
+    }
+  } catch {
+    return $false
+  }
+
+  return $false
+}
+
+function Test-ChromeTabAudible {
+  param($Tab)
+
+  try {
+    $name = [string]$Tab.Current.Name
+    if ($name -match '(?i)\bAudio playing\b') {
+      return $true
+    }
+
+    $buttonCondition = [System.Windows.Automation.PropertyCondition]::new(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Button
+    )
+    $buttons = $Tab.FindAll([System.Windows.Automation.TreeScope]::Subtree, $buttonCondition)
+    foreach ($button in $buttons) {
+      try {
+        $buttonName = [string]$button.Current.Name
+        $automationId = [string]$button.Current.AutomationId
+        if ($buttonName -match '(?i)^Mute tab$' -and $automationId -match '(?i)AlertIndicatorButton') {
+          return $true
+        }
+      } catch {
+        continue
+      }
+    }
+  } catch {
+    return $false
+  }
+
+  return $false
+}
+
+function Get-ChromeAudibleTabs {
+  param([bool]$ShouldScan)
+
+  if (-not $ShouldScan) {
+    return @()
+  }
+
+  $tabs = @()
+
+  try {
+    $tabCondition = [System.Windows.Automation.PropertyCondition]::new(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::TabItem
+    )
+
+    foreach ($process in Get-Process -Name chrome -ErrorAction SilentlyContinue) {
+      try {
+        if (-not $process.MainWindowHandle -or $process.MainWindowHandle -eq [IntPtr]::Zero) {
+          continue
+        }
+
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+        if (-not $root) {
+          continue
+        }
+
+        $windowId = ([Int64]$process.MainWindowHandle).ToString()
+        $tabItems = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $tabCondition)
+        foreach ($tab in $tabItems) {
+          try {
+            if (-not (Test-ChromeTabAudible -Tab $tab)) {
+              continue
+            }
+
+            $title = [string]$tab.Current.Name
+            if ([string]::IsNullOrWhiteSpace($title)) {
+              continue
+            }
+
+            $tabs += @{
+              title = $title.Trim()
+              url = ''
+              privacyMode = if ($title -match '(?i)incognito') { 'incognito' } else { 'normal' }
+              windowId = $windowId
+              isSelected = Test-ChromeTabSelected -Tab $tab
+            }
+          } catch {
+            continue
+          }
+        }
+      } catch {
+        continue
+      }
+    }
+  } catch {
+    return @()
+  }
+
+  return $tabs
+}
+
 while ($true) {
   try {
     $foreground = $null
     $chromeTab = $null
+    $foregroundWindowId = $null
     $hwnd = [FocusGateActivityInterop]::GetForegroundWindow()
     if ($hwnd -ne [IntPtr]::Zero) {
+      $foregroundWindowId = ([Int64]$hwnd).ToString()
       $foregroundPid = 0
       [FocusGateActivityInterop]::GetWindowThreadProcessId($hwnd, [ref]$foregroundPid) | Out-Null
       if ($foregroundPid) {
@@ -574,12 +688,19 @@ while ($true) {
       }
     }
 
+    $mediaApps = @(Get-MediaApps)
+    $hasChromeAudio = ($mediaApps | Where-Object { $_ -and $_.name -eq 'chrome.exe' } | Select-Object -First 1) -ne $null
+    $chromeAudibleTabs = @(Get-ChromeAudibleTabs -ShouldScan ($hasChromeAudio -or $hadAudibleChromeTabs))
+    $hadAudibleChromeTabs = $chromeAudibleTabs.Count -gt 0
+
     $sample = @{
       timestamp = [DateTime]::UtcNow.ToString('o')
       foreground = $foreground
       idleMs = Get-IdleMilliseconds
-      mediaApps = @(Get-MediaApps)
+      mediaApps = $mediaApps
       chromeTab = $chromeTab
+      foregroundWindowId = $foregroundWindowId
+      chromeAudibleTabs = $chromeAudibleTabs
     }
 
     $sample | ConvertTo-Json -Compress -Depth 5

@@ -289,7 +289,7 @@ export function Activity() {
                         {formatDuration(app.total_seconds)}
                       </td>
                       <td style={{ padding: '10px 8px', borderBottom: '1px solid var(--border)', width: 36, textAlign: 'center' }}>
-                        {!isChrome && hoveredRow === app.app_name && (
+                        {hoveredRow === app.app_name && (
                           <button
                             onClick={() => handleHideApp(app.app_name)}
                             title="Hide from tracking"

@@ -134,7 +134,7 @@ export function registerIpcHandlers(
   ipcMain.handle(IPC.GET_ACTIVITY_FOR_DATE, async (_event, date: string) => {
     const hiddenApps: string[] = store.get('hiddenApps', []) as string[]
     const apps = getActivityForDate(date, hiddenApps)
-    const chromeWebsites = getChromeTabUsageForDate(date)
+    const chromeWebsites = getChromeTabUsageForDate(date, hiddenApps)
     
     // Use Date.UTC to avoid local timezone shifting the date
     const [y, m, d] = date.split('-').map(Number)

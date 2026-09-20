@@ -112,6 +112,11 @@ export interface ChromeTabObservation {
   privacyMode: 'normal' | 'incognito' | 'unknown'
 }
 
+export interface ChromeAudibleTabObservation extends ChromeTabObservation {
+  windowId: string
+  isSelected: boolean
+}
+
 export interface ChromeTabIdentity {
   websiteKey: string
   websiteLabel: string
