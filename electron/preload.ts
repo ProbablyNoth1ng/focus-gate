@@ -23,6 +23,9 @@ const IPC = {
   HIDE_APP:           'activity:hideApp',
   UNHIDE_APP:         'activity:unhideApp',
   GET_ACTIVITY_FOR_DATE: 'activity:getForDate',
+  REMOVE_APP_ACTIVITY: 'activity:removeApp',
+  REMOVE_CHROME_WEBSITE_ACTIVITY: 'activity:removeChromeWebsite',
+  REMOVE_CHROME_PAGE_ACTIVITY: 'activity:removeChromePage',
 } as const
 
  
@@ -113,6 +116,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getActivityForDate: (date: string): Promise<ActivityForDateResult> =>
     ipcRenderer.invoke(IPC.GET_ACTIVITY_FOR_DATE, date),
+
+  removeAppActivity: (date: string, appName: string): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke(IPC.REMOVE_APP_ACTIVITY, date, appName),
+
+  removeChromeWebsiteActivity: (date: string, websiteKey: string): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke(IPC.REMOVE_CHROME_WEBSITE_ACTIVITY, date, websiteKey),
+
+  removeChromePageActivity: (date: string, websiteKey: string, pageKey: string): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke(IPC.REMOVE_CHROME_PAGE_ACTIVITY, date, websiteKey, pageKey),
 
    onInterceptionStart: (cb: (payload: InterceptionPayload) => void): (() => void) => {
     const handler = (_: Electron.IpcRendererEvent, payload: InterceptionPayload) => cb(payload)

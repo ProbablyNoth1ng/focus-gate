@@ -47,26 +47,33 @@ export function Activity() {
   const [expandedChrome, setExpandedChrome] = useState(false)
   const [expandedWebsites, setExpandedWebsites] = useState<Set<string>>(() => new Set())
 
-  const loadData = (background = false) => {
+  const loadData = useCallback(async (background = false) => {
     if (!background) {
       setLoading(true)
     }
-    window.electronAPI.getActivity().then(d => {
+    try {
+      const d = await window.electronAPI.getActivity()
       setData(d)
       if (d.apps.length > 0) {
-        window.electronAPI.getActivityIcons(d.apps.map(a => a.app_name.replace(/\.exe$/i, ''))).then(setIcons)
+        const iconResult = await window.electronAPI.getActivityIcons(d.apps.map(a => a.app_name.replace(/\.exe$/i, '')))
+        setIcons(iconResult)
       }
-    }).finally(() => {
+    } finally {
       if (!background) {
         setLoading(false)
       }
-    })
-  }
+    }
+  }, [])
 
   const loadDayData = useCallback(async () => {
     try {
       const result = await window.electronAPI.getActivityForDate(selectedDate)
       setDayData(result)
+      setExpandedChrome((current) => current && result.chromeWebsites.length > 0)
+      setExpandedWebsites((current) => {
+        const availableKeys = new Set(result.chromeWebsites.map((website) => website.website_key))
+        return new Set([...current].filter((websiteKey) => availableKeys.has(websiteKey)))
+      })
       if (result.apps.length > 0) {
         const iconResult = await window.electronAPI.getActivityIcons(
           result.apps.map(a => a.app_name)
@@ -80,7 +87,7 @@ export function Activity() {
 
   useEffect(() => {
     loadData()
-  }, [])
+  }, [loadData])
 
   useEffect(() => {
     loadDayData()
@@ -93,16 +100,29 @@ export function Activity() {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      loadData(true)
+      void loadData(true)
       loadDayData()
     }, 60000)
     return () => clearInterval(interval)
-  }, [loadDayData])
+  }, [loadData, loadDayData])
 
-  const handleHideApp = async (appName: string) => {
-    await window.electronAPI.hideApp(appName)
-    loadDayData()
-    loadData()
+  const refreshActivity = async () => {
+    await Promise.all([loadDayData(), loadData(true)])
+  }
+
+  const handleRemoveAppActivity = async (appName: string) => {
+    await window.electronAPI.removeAppActivity(selectedDate, appName)
+    await refreshActivity()
+  }
+
+  const handleRemoveChromeWebsiteActivity = async (websiteKey: string) => {
+    await window.electronAPI.removeChromeWebsiteActivity(selectedDate, websiteKey)
+    await refreshActivity()
+  }
+
+  const handleRemoveChromePageActivity = async (websiteKey: string, pageKey: string) => {
+    await window.electronAPI.removeChromePageActivity(selectedDate, websiteKey, pageKey)
+    await refreshActivity()
   }
 
   const toggleWebsite = (websiteKey: string) => {
@@ -291,8 +311,9 @@ export function Activity() {
                       <td style={{ padding: '10px 8px', borderBottom: '1px solid var(--border)', width: 36, textAlign: 'center' }}>
                         {hoveredRow === app.app_name && (
                           <button
-                            onClick={() => handleHideApp(app.app_name)}
-                            title="Hide from tracking"
+                            onClick={() => handleRemoveAppActivity(app.app_name)}
+                            aria-label={`Remove activity for ${cleanName}`}
+                            title="Remove activity"
                             style={{
                               background: 'none',
                               border: 'none',
@@ -320,6 +341,8 @@ export function Activity() {
                         websites={chromeWebsites}
                         expandedWebsites={expandedWebsites}
                         onToggleWebsite={toggleWebsite}
+                        onRemoveWebsite={handleRemoveChromeWebsiteActivity}
+                        onRemovePage={handleRemoveChromePageActivity}
                       />
                     )}
                   </Fragment>
@@ -358,11 +381,16 @@ function ChromeWebsiteRows({
   websites,
   expandedWebsites,
   onToggleWebsite,
+  onRemoveWebsite,
+  onRemovePage,
 }: {
   websites: ChromeWebsiteUsageSummary[]
   expandedWebsites: Set<string>
   onToggleWebsite: (websiteKey: string) => void
+  onRemoveWebsite: (websiteKey: string) => void
+  onRemovePage: (websiteKey: string, pageKey: string) => void
 }) {
+  const [hoveredChromeRow, setHoveredChromeRow] = useState<string | null>(null)
   const titleStyle: React.CSSProperties = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
@@ -378,7 +406,11 @@ function ChromeWebsiteRows({
 
         if (!hasMultiplePages && firstPage) {
           return (
-            <tr key={website.website_key}>
+            <tr
+              key={website.website_key}
+              onMouseEnter={() => setHoveredChromeRow(`website:${website.website_key}`)}
+              onMouseLeave={() => setHoveredChromeRow(null)}
+            >
               <td style={{ borderBottom: '1px solid var(--border)' }} />
               <td style={{ padding: '8px 12px 8px 28px', borderBottom: '1px solid var(--border)' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: 'minmax(90px, 190px) minmax(0, 1fr)', gap: 12, alignItems: 'center', minWidth: 0 }}>
@@ -393,14 +425,24 @@ function ChromeWebsiteRows({
               <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--accent-bright)', borderBottom: '1px solid var(--border)' }}>
                 {formatDuration(firstPage.total_seconds)}
               </td>
-              <td style={{ borderBottom: '1px solid var(--border)' }} />
+              <td style={{ padding: '8px', borderBottom: '1px solid var(--border)', textAlign: 'center' }}>
+                {hoveredChromeRow === `website:${website.website_key}` && (
+                  <RemoveActivityButton
+                    label={`Remove activity for ${website.website_label}`}
+                    onClick={() => onRemoveWebsite(website.website_key)}
+                  />
+                )}
+              </td>
             </tr>
           )
         }
 
         return (
           <Fragment key={website.website_key}>
-            <tr>
+            <tr
+              onMouseEnter={() => setHoveredChromeRow(`website:${website.website_key}`)}
+              onMouseLeave={() => setHoveredChromeRow(null)}
+            >
               <td style={{ borderBottom: '1px solid var(--border)' }} />
               <td style={{ padding: '8px 12px 8px 28px', borderBottom: '1px solid var(--border)' }}>
                 <button
@@ -435,10 +477,21 @@ function ChromeWebsiteRows({
               <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--accent-bright)', borderBottom: '1px solid var(--border)' }}>
                 {formatDuration(website.total_seconds)}
               </td>
-              <td style={{ borderBottom: '1px solid var(--border)' }} />
+              <td style={{ padding: '8px', borderBottom: '1px solid var(--border)', textAlign: 'center' }}>
+                {hoveredChromeRow === `website:${website.website_key}` && (
+                  <RemoveActivityButton
+                    label={`Remove activity for ${website.website_label}`}
+                    onClick={() => onRemoveWebsite(website.website_key)}
+                  />
+                )}
+              </td>
             </tr>
             {expanded && website.pages.map((page) => (
-              <tr key={page.page_key}>
+              <tr
+                key={page.page_key}
+                onMouseEnter={() => setHoveredChromeRow(`page:${website.website_key}:${page.page_key}`)}
+                onMouseLeave={() => setHoveredChromeRow(null)}
+              >
                 <td style={{ borderBottom: '1px solid var(--border)' }} />
                 <td style={{ padding: '7px 12px 7px 28px', borderBottom: '1px solid var(--border)' }}>
                   <div style={{ display: 'grid', gridTemplateColumns: 'minmax(90px, 190px) minmax(0, 1fr)', gap: 12, alignItems: 'center', minWidth: 0 }}>
@@ -464,12 +517,53 @@ function ChromeWebsiteRows({
                 <td style={{ padding: '7px 12px', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--accent-bright)', borderBottom: '1px solid var(--border)' }}>
                   {formatDuration(page.total_seconds)}
                 </td>
-                <td style={{ borderBottom: '1px solid var(--border)' }} />
+                <td style={{ padding: '7px 8px', borderBottom: '1px solid var(--border)', textAlign: 'center' }}>
+                  {hoveredChromeRow === `page:${website.website_key}:${page.page_key}` && (
+                    <RemoveActivityButton
+                      label={`Remove activity for ${page.title}`}
+                      onClick={() => onRemovePage(website.website_key, page.page_key)}
+                    />
+                  )}
+                </td>
               </tr>
             ))}
           </Fragment>
         )
       })}
     </>
+  )
+}
+
+function RemoveActivityButton({
+  label,
+  onClick,
+}: {
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      title="Remove activity"
+      style={{
+        background: 'none',
+        border: 'none',
+        cursor: 'pointer',
+        padding: 4,
+        borderRadius: 4,
+        color: 'var(--text-muted)',
+        fontSize: 14,
+        lineHeight: 1,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        transition: 'color 0.15s',
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--danger)')}
+      onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}
+    >
+      <IoClose style={{ fontSize: 14 }} />
+    </button>
   )
 }

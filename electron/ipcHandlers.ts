@@ -17,6 +17,9 @@ import {
   getActivityForDate,
   getChromeTabUsageForDate,
   hasVisibleActivityForDate,
+  removeAppActivity,
+  removeChromeWebsiteActivity,
+  removeChromePageActivity,
 } from './database'
 import { setAutostart } from './autostart'
 import { setTrayPaused } from './tray'
@@ -128,6 +131,21 @@ export function registerIpcHandlers(
     const full = { ...settings, hiddenApps: hidden } as AppSettings
     onSettingsChange(full)
     return hidden
+  })
+
+  ipcMain.handle(IPC.REMOVE_APP_ACTIVITY, (_event, date: string, appName: string) => {
+    removeAppActivity(date, appName)
+    return { success: true }
+  })
+
+  ipcMain.handle(IPC.REMOVE_CHROME_WEBSITE_ACTIVITY, (_event, date: string, websiteKey: string) => {
+    removeChromeWebsiteActivity(date, websiteKey)
+    return { success: true }
+  })
+
+  ipcMain.handle(IPC.REMOVE_CHROME_PAGE_ACTIVITY, (_event, date: string, websiteKey: string, pageKey: string) => {
+    removeChromePageActivity(date, websiteKey, pageKey)
+    return { success: true }
   })
 
   // ── Activity for specific date ────────────────────────────

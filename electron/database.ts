@@ -166,6 +166,76 @@ function stableTitleKey(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
+function normalizeAppActivityName(appName: string): string {
+  return appName.trim().toLowerCase().replace(/\.exe$/i, '')
+}
+
+function decreaseChromeAppUsageForDate(date: string, seconds: number): void {
+  const decrement = Math.max(0, Math.round(seconds))
+  if (!date || decrement <= 0) return
+
+  const rows = queryAll<{ seconds: number }>(
+    `SELECT seconds
+     FROM app_usage
+     WHERE date = ?
+       AND REPLACE(LOWER(app_name), '.exe', '') = 'chrome'`,
+    [date]
+  )
+  const currentTotal = rows.reduce((total, row) => total + row.seconds, 0)
+  if (currentTotal <= 0) return
+
+  const nextTotal = Math.max(0, currentTotal - decrement)
+  db.run(
+    `DELETE FROM app_usage
+     WHERE date = ?
+       AND REPLACE(LOWER(app_name), '.exe', '') = 'chrome'`,
+    [date]
+  )
+  if (nextTotal > 0) {
+    db.run(
+      'INSERT INTO app_usage (app_name, date, seconds) VALUES (?, ?, ?)',
+      ['chrome', date, nextTotal]
+    )
+  }
+}
+
+function getDisplayWebsiteForChromeRow(row: {
+  website_key: string
+  website_label: string
+  title: string
+}): { website_key: string; website_label: string } | null {
+  if (row.website_key.startsWith('host:')) {
+    return { website_key: row.website_key, website_label: row.website_label }
+  }
+
+  const normalized = normalizeChromeWebsiteIdentityFromTitle(row.title, row.website_label)
+  return normalized
+    ? { website_key: normalized.websiteKey, website_label: normalized.websiteLabel }
+    : null
+}
+
+function getChromePageRowsForDate(date: string): {
+  website_key: string
+  website_label: string
+  page_key: string
+  title: string
+  total_seconds: number
+}[] {
+  return queryAll<{
+    website_key: string
+    website_label: string
+    page_key: string
+    title: string
+    total_seconds: number
+  }>(
+    `SELECT website_key, website_label, page_key, page_title as title, seconds as total_seconds
+     FROM chrome_tab_usage
+     WHERE date = ? AND seconds > 0
+     ORDER BY seconds DESC, website_label COLLATE NOCASE ASC, title COLLATE NOCASE ASC`,
+    [date]
+  )
+}
+
 export function logIntention(
   appName: string,
   exePath: string,
@@ -323,6 +393,90 @@ export function clearAll(): void {
   persistNow()
 }
 
+export function removeAppActivity(date: string, appName: string): void {
+  if (!db) return
+  const normalizedName = normalizeAppActivityName(appName)
+  if (!date || !normalizedName) return
+
+  db.run(
+    `DELETE FROM app_usage
+     WHERE date = ?
+       AND REPLACE(LOWER(app_name), '.exe', '') = ?`,
+    [date, normalizedName]
+  )
+  db.run(
+    `DELETE FROM app_activity
+     WHERE strftime('%Y-%m-%d', datetime(timestamp, 'localtime')) = ?
+       AND REPLACE(LOWER(app_name), '.exe', '') = ?`,
+    [date, normalizedName]
+  )
+
+  if (normalizedName === 'chrome') {
+    db.run('DELETE FROM chrome_tab_usage WHERE date = ?', [date])
+  }
+
+  persistNow()
+}
+
+export function removeChromeWebsiteActivity(date: string, websiteKey: string): void {
+  if (!db || !date || !websiteKey) return
+
+  const rowsToRemove = getChromePageRowsForDate(date)
+    .filter((row) => getDisplayWebsiteForChromeRow(row)?.website_key === websiteKey)
+  if (rowsToRemove.length === 0) return
+
+  const removedSeconds = rowsToRemove.reduce((total, row) => total + row.total_seconds, 0)
+  db.run('BEGIN TRANSACTION')
+  try {
+    for (const row of rowsToRemove) {
+      db.run('DELETE FROM chrome_tab_usage WHERE date = ? AND page_key = ?', [date, row.page_key])
+    }
+    decreaseChromeAppUsageForDate(date, removedSeconds)
+    db.run('COMMIT')
+  } catch (err) {
+    db.run('ROLLBACK')
+    throw err
+  }
+
+  persistNow()
+}
+
+export function removeChromePageActivity(date: string, websiteKey: string, pageKey: string): void {
+  if (!db || !date || !websiteKey || !pageKey) return
+
+  const rows = getChromePageRowsForDate(date)
+  const targetRow = rows.find((row) => {
+    const website = getDisplayWebsiteForChromeRow(row)
+    return website?.website_key === websiteKey && row.page_key === pageKey
+  })
+  if (!targetRow) return
+
+  const targetPageTitleKey = stableTitleKey(targetRow.title)
+  const rowsToRemove: typeof rows = []
+  for (const row of rows) {
+    const website = getDisplayWebsiteForChromeRow(row)
+    if (website?.website_key !== websiteKey) continue
+    if (stableTitleKey(row.title) !== targetPageTitleKey) continue
+    rowsToRemove.push(row)
+  }
+  if (rowsToRemove.length === 0) return
+
+  const removedSeconds = rowsToRemove.reduce((total, row) => total + row.total_seconds, 0)
+  db.run('BEGIN TRANSACTION')
+  try {
+    for (const row of rowsToRemove) {
+      db.run('DELETE FROM chrome_tab_usage WHERE date = ? AND page_key = ?', [date, row.page_key])
+    }
+    decreaseChromeAppUsageForDate(date, removedSeconds)
+    db.run('COMMIT')
+  } catch (err) {
+    db.run('ROLLBACK')
+    throw err
+  }
+
+  persistNow()
+}
+
 export function accumulateUsage(appName: string, seconds: number): void {
   if (!db || seconds <= 0) return
   const key = appName.toLowerCase()
@@ -386,30 +540,11 @@ export function getChromeTabUsageForDate(date: string, hiddenApps: string[] = []
   const hidden = hiddenApps.map(h => h.toLowerCase().replace(/\.exe$/i, ''))
   if (hidden.includes('chrome')) return []
 
-  const pageRows = queryAll<{
-    website_key: string
-    website_label: string
-    page_key: string
-    title: string
-    total_seconds: number
-  }>(
-    `SELECT website_key, website_label, page_key, page_title as title, seconds as total_seconds
-     FROM chrome_tab_usage
-     WHERE date = ? AND seconds > 0
-     ORDER BY seconds DESC, website_label COLLATE NOCASE ASC, title COLLATE NOCASE ASC`,
-    [date]
-  )
+  const pageRows = getChromePageRowsForDate(date)
 
   const byWebsite = new Map<string, ChromeWebsiteUsageSummary>()
   for (const row of pageRows) {
-    const website = row.website_key.startsWith('host:')
-      ? { website_key: row.website_key, website_label: row.website_label }
-      : (() => {
-          const normalized = normalizeChromeWebsiteIdentityFromTitle(row.title, row.website_label)
-          return normalized
-            ? { website_key: normalized.websiteKey, website_label: normalized.websiteLabel }
-            : null
-        })()
+    const website = getDisplayWebsiteForChromeRow(row)
     if (!website) continue
     const existing = byWebsite.get(website.website_key)
     if (existing) {
@@ -615,7 +750,7 @@ export function exportCsv(): string {
 
 export function getActivityForDate(date: string, hiddenApps: string[]): { app_name: string; total_seconds: number }[] {
   if (!db) return []
-  const hidden = hiddenApps.map(h => h.toLowerCase())
+  const hidden = hiddenApps.map(normalizeAppActivityName)
   const rows = queryAll<{ app_name: string; total_seconds: number }>(
     `SELECT app_name, seconds as total_seconds
      FROM app_usage
@@ -628,7 +763,7 @@ export function getActivityForDate(date: string, hiddenApps: string[]): { app_na
   )
 
   return rows
-    .filter(r => !hidden.includes(r.app_name.toLowerCase()))
+    .filter(r => !hidden.includes(normalizeAppActivityName(r.app_name)))
     .map(r => ({
       app_name: r.app_name.replace(/\.exe$/i, ''),
       total_seconds: r.total_seconds,
@@ -649,7 +784,7 @@ export function hasActivityForDate(date: string): boolean {
 
 export function hasVisibleActivityForDate(date: string, hiddenApps: string[]): boolean {
   if (!db) return false
-  const hidden = hiddenApps.map(h => h.toLowerCase())
+  const hidden = hiddenApps.map(normalizeAppActivityName)
   const appRows = queryAll<{ app_name: string }>(
     `SELECT app_name
      FROM app_usage
@@ -659,7 +794,7 @@ export function hasVisibleActivityForDate(date: string, hiddenApps: string[]): b
        AND app_name NOT LIKE '~%'`,
     [date]
   )
-  const hasVisibleApp = appRows.some(r => !hidden.includes(r.app_name.toLowerCase()))
+  const hasVisibleApp = appRows.some(r => !hidden.includes(normalizeAppActivityName(r.app_name)))
   if (hasVisibleApp) return true
   return getChromeTabUsageForDate(date, hiddenApps).length > 0
 }

@@ -23,6 +23,9 @@ export const IPC = {
   HIDE_APP:            'activity:hideApp',
   UNHIDE_APP:          'activity:unhideApp',
   GET_ACTIVITY_FOR_DATE: 'activity:getForDate',
+  REMOVE_APP_ACTIVITY: 'activity:removeApp',
+  REMOVE_CHROME_WEBSITE_ACTIVITY: 'activity:removeChromeWebsite',
+  REMOVE_CHROME_PAGE_ACTIVITY: 'activity:removeChromePage',
 } as const
 
 export type IpcKey = typeof IPC[keyof typeof IPC]
