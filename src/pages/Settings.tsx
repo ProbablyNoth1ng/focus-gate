@@ -65,6 +65,7 @@ export function Settings({ settings, onSave }: SettingsProps) {
   const [localLaunchAtStartup, setLocalLaunchAtStartup] = useState(settings.launchAtStartup)
   const [localDarkMode, setLocalDarkMode] = useState(settings.darkMode)
   const [localFocusHoursEnabled, setLocalFocusHoursEnabled] = useState(settings.focusHoursEnabled)
+  const [localTrackIncognitoTabs, setLocalTrackIncognitoTabs] = useState(settings.trackIncognitoTabs)
 
   useEffect(() => { setHiddenApps(settings.hiddenApps ?? []) }, [settings.hiddenApps])
   useEffect(() => { setMinWordCount(settings.minWordCount) }, [settings.minWordCount])
@@ -74,6 +75,7 @@ export function Settings({ settings, onSave }: SettingsProps) {
   useEffect(() => { setLocalLaunchAtStartup(settings.launchAtStartup) }, [settings.launchAtStartup])
   useEffect(() => { setLocalDarkMode(settings.darkMode) }, [settings.darkMode])
   useEffect(() => { setLocalFocusHoursEnabled(settings.focusHoursEnabled) }, [settings.focusHoursEnabled])
+  useEffect(() => { setLocalTrackIncognitoTabs(settings.trackIncognitoTabs) }, [settings.trackIncognitoTabs])
 
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingPartial = useRef<Partial<AppSettings>>({})
@@ -280,6 +282,25 @@ export function Settings({ settings, onSave }: SettingsProps) {
             </FieldRow>
           </>
         )}
+      </Section>
+
+      <Section>
+        <SectionHeader
+          title="Activity Tracking"
+          subtitle="Configure how app and website activity is recorded"
+        />
+        <FieldRow
+          label="Track Incognito tabs"
+          hint="Include future focused Chrome Incognito tab time in Activity"
+        >
+          <Toggle
+            checked={localTrackIncognitoTabs}
+            onChange={v => {
+              setLocalTrackIncognitoTabs(v)
+              debouncedSave({ trackIncognitoTabs: v })
+            }}
+          />
+        </FieldRow>
       </Section>
 
       <Section>

@@ -3,7 +3,8 @@ import fs from 'fs'
 import { exec } from 'child_process'
 import { app } from 'electron'
 import initSqlJs, { Database, SqlJsStatic } from 'sql.js'
-import type { IntentionLog, StatsData } from '../shared/ipc-types'
+import type { ChromeTabIdentity, ChromeWebsiteUsageSummary, IntentionLog, StatsData } from '../shared/ipc-types'
+import { normalizeChromeWebsiteIdentityFromTitle } from './chromeTabIdentity'
 
 let db: Database
 let SQL: SqlJsStatic
@@ -50,6 +51,18 @@ export async function initDatabase(): Promise<void> {
     db = new SQL.Database()
   }
 
+  __createTestDatabase()
+
+  console.log('[DB] Initialized at', dbPath)
+}
+
+export function __setTestDatabase(testDb: Database | null): void {
+  db = testDb as Database
+}
+
+export function __createTestDatabase(): void {
+  if (!db) return
+
   db.run(`
     CREATE TABLE IF NOT EXISTS intention_logs (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,14 +101,25 @@ export async function initDatabase(): Promise<void> {
       seconds INTEGER NOT NULL DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS chrome_tab_usage (
+      date TEXT NOT NULL,
+      website_key TEXT NOT NULL,
+      website_label TEXT NOT NULL,
+      page_key TEXT NOT NULL,
+      page_title TEXT NOT NULL,
+      identity_source TEXT NOT NULL CHECK(identity_source IN ('url', 'title')),
+      seconds INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(date, page_key)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_activity_timestamp   ON app_activity(timestamp);
     CREATE INDEX IF NOT EXISTS idx_activity_name        ON app_activity(app_name);
     CREATE INDEX IF NOT EXISTS idx_logs_timestamp       ON intention_logs(timestamp);
     CREATE INDEX IF NOT EXISTS idx_results_timestamp    ON interception_results(timestamp);
     CREATE INDEX IF NOT EXISTS idx_app_usage_date       ON app_usage(date);
+    CREATE INDEX IF NOT EXISTS idx_chrome_tab_usage_date ON chrome_tab_usage(date);
+    CREATE INDEX IF NOT EXISTS idx_chrome_tab_usage_site ON chrome_tab_usage(date, website_key);
   `)
-
-  console.log('[DB] Initialized at', dbPath)
 }
 
 function persistNow(): void {
@@ -104,6 +128,7 @@ function persistNow(): void {
     clearTimeout(persistTimer)
     persistTimer = null
   }
+  if (!dbPath) return
   const data = db.export()
   fs.writeFileSync(dbPath, Buffer.from(data))
 }
@@ -135,6 +160,80 @@ function queryAll<T>(sql: string, params: (string | number)[] = []): T[] {
 function queryOne<T>(sql: string, params: (string | number)[] = []): T | undefined {
   const results = queryAll<T>(sql, params)
   return results[0]
+}
+
+function stableTitleKey(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function normalizeAppActivityName(appName: string): string {
+  return appName.trim().toLowerCase().replace(/\.exe$/i, '')
+}
+
+function decreaseChromeAppUsageForDate(date: string, seconds: number): void {
+  const decrement = Math.max(0, Math.round(seconds))
+  if (!date || decrement <= 0) return
+
+  const rows = queryAll<{ seconds: number }>(
+    `SELECT seconds
+     FROM app_usage
+     WHERE date = ?
+       AND REPLACE(LOWER(app_name), '.exe', '') = 'chrome'`,
+    [date]
+  )
+  const currentTotal = rows.reduce((total, row) => total + row.seconds, 0)
+  if (currentTotal <= 0) return
+
+  const nextTotal = Math.max(0, currentTotal - decrement)
+  db.run(
+    `DELETE FROM app_usage
+     WHERE date = ?
+       AND REPLACE(LOWER(app_name), '.exe', '') = 'chrome'`,
+    [date]
+  )
+  if (nextTotal > 0) {
+    db.run(
+      'INSERT INTO app_usage (app_name, date, seconds) VALUES (?, ?, ?)',
+      ['chrome', date, nextTotal]
+    )
+  }
+}
+
+function getDisplayWebsiteForChromeRow(row: {
+  website_key: string
+  website_label: string
+  title: string
+}): { website_key: string; website_label: string } | null {
+  if (row.website_key.startsWith('host:')) {
+    return { website_key: row.website_key, website_label: row.website_label }
+  }
+
+  const normalized = normalizeChromeWebsiteIdentityFromTitle(row.title, row.website_label)
+  return normalized
+    ? { website_key: normalized.websiteKey, website_label: normalized.websiteLabel }
+    : null
+}
+
+function getChromePageRowsForDate(date: string): {
+  website_key: string
+  website_label: string
+  page_key: string
+  title: string
+  total_seconds: number
+}[] {
+  return queryAll<{
+    website_key: string
+    website_label: string
+    page_key: string
+    title: string
+    total_seconds: number
+  }>(
+    `SELECT website_key, website_label, page_key, page_title as title, seconds as total_seconds
+     FROM chrome_tab_usage
+     WHERE date = ? AND seconds > 0
+     ORDER BY seconds DESC, website_label COLLATE NOCASE ASC, title COLLATE NOCASE ASC`,
+    [date]
+  )
 }
 
 export function logIntention(
@@ -279,6 +378,7 @@ export function clearActivity(): void {
   db.run('DELETE FROM app_activity')
   db.run('DELETE FROM app_usage')
   db.run('DELETE FROM daily_screen_time')
+  db.run('DELETE FROM chrome_tab_usage')
   persistNow()
 }
 
@@ -289,6 +389,91 @@ export function clearAll(): void {
   db.run('DELETE FROM interception_results')
   db.run('DELETE FROM app_usage')
   db.run('DELETE FROM daily_screen_time')
+  db.run('DELETE FROM chrome_tab_usage')
+  persistNow()
+}
+
+export function removeAppActivity(date: string, appName: string): void {
+  if (!db) return
+  const normalizedName = normalizeAppActivityName(appName)
+  if (!date || !normalizedName) return
+
+  db.run(
+    `DELETE FROM app_usage
+     WHERE date = ?
+       AND REPLACE(LOWER(app_name), '.exe', '') = ?`,
+    [date, normalizedName]
+  )
+  db.run(
+    `DELETE FROM app_activity
+     WHERE strftime('%Y-%m-%d', datetime(timestamp, 'localtime')) = ?
+       AND REPLACE(LOWER(app_name), '.exe', '') = ?`,
+    [date, normalizedName]
+  )
+
+  if (normalizedName === 'chrome') {
+    db.run('DELETE FROM chrome_tab_usage WHERE date = ?', [date])
+  }
+
+  persistNow()
+}
+
+export function removeChromeWebsiteActivity(date: string, websiteKey: string): void {
+  if (!db || !date || !websiteKey) return
+
+  const rowsToRemove = getChromePageRowsForDate(date)
+    .filter((row) => getDisplayWebsiteForChromeRow(row)?.website_key === websiteKey)
+  if (rowsToRemove.length === 0) return
+
+  const removedSeconds = rowsToRemove.reduce((total, row) => total + row.total_seconds, 0)
+  db.run('BEGIN TRANSACTION')
+  try {
+    for (const row of rowsToRemove) {
+      db.run('DELETE FROM chrome_tab_usage WHERE date = ? AND page_key = ?', [date, row.page_key])
+    }
+    decreaseChromeAppUsageForDate(date, removedSeconds)
+    db.run('COMMIT')
+  } catch (err) {
+    db.run('ROLLBACK')
+    throw err
+  }
+
+  persistNow()
+}
+
+export function removeChromePageActivity(date: string, websiteKey: string, pageKey: string): void {
+  if (!db || !date || !websiteKey || !pageKey) return
+
+  const rows = getChromePageRowsForDate(date)
+  const targetRow = rows.find((row) => {
+    const website = getDisplayWebsiteForChromeRow(row)
+    return website?.website_key === websiteKey && row.page_key === pageKey
+  })
+  if (!targetRow) return
+
+  const targetPageTitleKey = stableTitleKey(targetRow.title)
+  const rowsToRemove: typeof rows = []
+  for (const row of rows) {
+    const website = getDisplayWebsiteForChromeRow(row)
+    if (website?.website_key !== websiteKey) continue
+    if (stableTitleKey(row.title) !== targetPageTitleKey) continue
+    rowsToRemove.push(row)
+  }
+  if (rowsToRemove.length === 0) return
+
+  const removedSeconds = rowsToRemove.reduce((total, row) => total + row.total_seconds, 0)
+  db.run('BEGIN TRANSACTION')
+  try {
+    for (const row of rowsToRemove) {
+      db.run('DELETE FROM chrome_tab_usage WHERE date = ? AND page_key = ?', [date, row.page_key])
+    }
+    decreaseChromeAppUsageForDate(date, removedSeconds)
+    db.run('COMMIT')
+  } catch (err) {
+    db.run('ROLLBACK')
+    throw err
+  }
+
   persistNow()
 }
 
@@ -317,6 +502,91 @@ export function accumulateDailyScreenTime(seconds: number): void {
     [today, increment]
   )
   schedulePersist()
+}
+
+export function accumulateChromeTabUsage(identity: ChromeTabIdentity & { date: string }, seconds: number): void {
+  if (!db || seconds <= 0) return
+  const increment = Math.max(1, Math.round(seconds))
+  const title = identity.pageTitle.trim()
+
+  db.run(
+    `INSERT INTO chrome_tab_usage (
+       date, website_key, website_label, page_key, page_title, identity_source, seconds
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(date, page_key) DO UPDATE SET
+       website_key = excluded.website_key,
+       website_label = excluded.website_label,
+       page_title = CASE
+         WHEN excluded.page_title <> '' THEN excluded.page_title
+         ELSE chrome_tab_usage.page_title
+       END,
+       identity_source = excluded.identity_source,
+       seconds = chrome_tab_usage.seconds + excluded.seconds`,
+    [
+      identity.date,
+      identity.websiteKey,
+      identity.websiteLabel,
+      identity.pageKey,
+      title,
+      identity.identitySource,
+      increment,
+    ]
+  )
+  schedulePersist()
+}
+
+export function getChromeTabUsageForDate(date: string, hiddenApps: string[] = []): ChromeWebsiteUsageSummary[] {
+  if (!db) return []
+  const hidden = hiddenApps.map(h => h.toLowerCase().replace(/\.exe$/i, ''))
+  if (hidden.includes('chrome')) return []
+
+  const pageRows = getChromePageRowsForDate(date)
+
+  const byWebsite = new Map<string, ChromeWebsiteUsageSummary>()
+  for (const row of pageRows) {
+    const website = getDisplayWebsiteForChromeRow(row)
+    if (!website) continue
+    const existing = byWebsite.get(website.website_key)
+    if (existing) {
+      existing.total_seconds += row.total_seconds
+      const pageTitleKey = stableTitleKey(row.title)
+      const existingPage = existing.pages.find(page => stableTitleKey(page.title) === pageTitleKey)
+      if (existingPage) {
+        existingPage.total_seconds += row.total_seconds
+      } else {
+        existing.pages.push({
+          page_key: row.page_key,
+          title: row.title,
+          total_seconds: row.total_seconds,
+        })
+      }
+      continue
+    }
+
+    byWebsite.set(website.website_key, {
+      website_key: website.website_key,
+      website_label: website.website_label,
+      total_seconds: row.total_seconds,
+      pages: [{
+        page_key: row.page_key,
+        title: row.title,
+        total_seconds: row.total_seconds,
+      }],
+    })
+  }
+
+  const websites = [...byWebsite.values()]
+  for (const website of websites) {
+    website.pages.sort((left, right) => {
+      if (right.total_seconds !== left.total_seconds) return right.total_seconds - left.total_seconds
+      return left.title.localeCompare(right.title)
+    })
+  }
+
+  return websites.sort((a, b) => {
+    if (b.total_seconds !== a.total_seconds) return b.total_seconds - a.total_seconds
+    return a.website_label.localeCompare(b.website_label)
+  })
 }
 
 export function getActivityData(hiddenApps: string[] = []): { apps: { app_name: string; total_seconds: number }[]; dailyUsage: { date: string; total_seconds: number }[] } {
@@ -480,7 +750,7 @@ export function exportCsv(): string {
 
 export function getActivityForDate(date: string, hiddenApps: string[]): { app_name: string; total_seconds: number }[] {
   if (!db) return []
-  const hidden = hiddenApps.map(h => h.toLowerCase())
+  const hidden = hiddenApps.map(normalizeAppActivityName)
   const rows = queryAll<{ app_name: string; total_seconds: number }>(
     `SELECT app_name, seconds as total_seconds
      FROM app_usage
@@ -493,7 +763,7 @@ export function getActivityForDate(date: string, hiddenApps: string[]): { app_na
   )
 
   return rows
-    .filter(r => !hidden.includes(r.app_name.toLowerCase()))
+    .filter(r => !hidden.includes(normalizeAppActivityName(r.app_name)))
     .map(r => ({
       app_name: r.app_name.replace(/\.exe$/i, ''),
       total_seconds: r.total_seconds,
@@ -503,8 +773,28 @@ export function getActivityForDate(date: string, hiddenApps: string[]): { app_na
 export function hasActivityForDate(date: string): boolean {
   if (!db) return false
   const row = queryOne<{ '1': number }>(
-    `SELECT 1 FROM app_usage WHERE date = ? AND seconds > 0 LIMIT 1`,
-    [date]
+    `SELECT 1 FROM app_usage WHERE date = ? AND seconds > 0
+     UNION
+     SELECT 1 FROM chrome_tab_usage WHERE date = ? AND seconds > 0
+     LIMIT 1`,
+    [date, date]
   )
   return !!row
+}
+
+export function hasVisibleActivityForDate(date: string, hiddenApps: string[]): boolean {
+  if (!db) return false
+  const hidden = hiddenApps.map(normalizeAppActivityName)
+  const appRows = queryAll<{ app_name: string }>(
+    `SELECT app_name
+     FROM app_usage
+     WHERE date = ? AND seconds > 0
+       AND app_name NOT LIKE '%.tmp%'
+       AND app_name NOT LIKE '%.temp%'
+       AND app_name NOT LIKE '~%'`,
+    [date]
+  )
+  const hasVisibleApp = appRows.some(r => !hidden.includes(normalizeAppActivityName(r.app_name)))
+  if (hasVisibleApp) return true
+  return getChromeTabUsageForDate(date, hiddenApps).length > 0
 }

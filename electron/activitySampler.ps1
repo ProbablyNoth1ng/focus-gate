@@ -1,6 +1,10 @@
 $ErrorActionPreference = 'SilentlyContinue'
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
 
 Add-Type -TypeDefinition @"
 using System;
@@ -21,6 +25,9 @@ public static class FocusGateActivityInterop {
 
   [DllImport("user32.dll")]
   public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
 
   [DllImport("user32.dll")]
   public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
@@ -438,11 +445,237 @@ function Get-MediaApps {
     ForEach-Object { $_.Group[0] }
 }
 
+function Get-ForegroundWindowTitle {
+  param([IntPtr]$Hwnd)
+
+  try {
+    $builder = New-Object System.Text.StringBuilder 1024
+    [FocusGateActivityInterop]::GetWindowText($Hwnd, $builder, $builder.Capacity) | Out-Null
+    return $builder.ToString().Trim()
+  } catch {
+    return ''
+  }
+}
+
+function Get-AutomationValue {
+  param($Element)
+
+  try {
+    $pattern = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+    if ($pattern -and -not [string]::IsNullOrWhiteSpace($pattern.Current.Value)) {
+      return [string]$pattern.Current.Value
+    }
+  } catch {
+    return ''
+  }
+
+  return ''
+}
+
+function Get-ChromeAddressBarUrl {
+  param([IntPtr]$Hwnd)
+
+  try {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($Hwnd)
+    if (-not $root) {
+      return ''
+    }
+
+    $editCondition = [System.Windows.Automation.PropertyCondition]::new(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Edit
+    )
+
+    $edits = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $editCondition)
+    foreach ($edit in $edits) {
+      try {
+        $name = [string]$edit.Current.Name
+        if ($name -notmatch 'address|search|omnibox') {
+          continue
+        }
+
+        $value = Get-AutomationValue $edit
+        if ([string]::IsNullOrWhiteSpace($value)) {
+          continue
+        }
+
+        if ($value -match '^[a-zA-Z][a-zA-Z0-9+\-.]*://') {
+          return $value.Trim()
+        }
+
+        if ($value -match '^[^\s]+\.[^\s]+') {
+          return "https://$($value.Trim())"
+        }
+      } catch {
+        continue
+      }
+    }
+  } catch {
+    return ''
+  }
+
+  return ''
+}
+
+function Get-ChromePrivacyMode {
+  param(
+    [string]$Title,
+    [string]$Url
+  )
+
+  if ($Title -match '(?i)incognito') {
+    return 'incognito'
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($Url)) {
+    return 'normal'
+  }
+
+  return 'unknown'
+}
+
+function Get-ChromeTabObservation {
+  param(
+    [IntPtr]$Hwnd,
+    [string]$ProcessName
+  )
+
+  if ((Normalize-ExeName $ProcessName) -ne 'chrome.exe') {
+    return $null
+  }
+
+  try {
+    $title = Get-ForegroundWindowTitle $Hwnd
+    $url = Get-ChromeAddressBarUrl $Hwnd
+
+    return @{
+      title = $title
+      url = $url
+      privacyMode = Get-ChromePrivacyMode -Title $title -Url $url
+    }
+  } catch {
+    return $null
+  }
+}
+
+$hadAudibleChromeTabs = $false
+
+function Test-ChromeTabSelected {
+  param($Tab)
+
+  try {
+    $pattern = $Tab.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    if ($pattern) {
+      return [bool]$pattern.Current.IsSelected
+    }
+  } catch {
+    return $false
+  }
+
+  return $false
+}
+
+function Test-ChromeTabAudible {
+  param($Tab)
+
+  try {
+    $name = [string]$Tab.Current.Name
+    if ($name -match '(?i)\bAudio playing\b') {
+      return $true
+    }
+
+    $buttonCondition = [System.Windows.Automation.PropertyCondition]::new(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Button
+    )
+    $buttons = $Tab.FindAll([System.Windows.Automation.TreeScope]::Subtree, $buttonCondition)
+    foreach ($button in $buttons) {
+      try {
+        $buttonName = [string]$button.Current.Name
+        $automationId = [string]$button.Current.AutomationId
+        if ($buttonName -match '(?i)^Mute tab$' -and $automationId -match '(?i)AlertIndicatorButton') {
+          return $true
+        }
+      } catch {
+        continue
+      }
+    }
+  } catch {
+    return $false
+  }
+
+  return $false
+}
+
+function Get-ChromeAudibleTabs {
+  param([bool]$ShouldScan)
+
+  if (-not $ShouldScan) {
+    return @()
+  }
+
+  $tabs = @()
+
+  try {
+    $tabCondition = [System.Windows.Automation.PropertyCondition]::new(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::TabItem
+    )
+
+    foreach ($process in Get-Process -Name chrome -ErrorAction SilentlyContinue) {
+      try {
+        if (-not $process.MainWindowHandle -or $process.MainWindowHandle -eq [IntPtr]::Zero) {
+          continue
+        }
+
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+        if (-not $root) {
+          continue
+        }
+
+        $windowId = ([Int64]$process.MainWindowHandle).ToString()
+        $tabItems = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $tabCondition)
+        foreach ($tab in $tabItems) {
+          try {
+            if (-not (Test-ChromeTabAudible -Tab $tab)) {
+              continue
+            }
+
+            $title = [string]$tab.Current.Name
+            if ([string]::IsNullOrWhiteSpace($title)) {
+              continue
+            }
+
+            $tabs += @{
+              title = $title.Trim()
+              url = ''
+              privacyMode = if ($title -match '(?i)incognito') { 'incognito' } else { 'normal' }
+              windowId = $windowId
+              isSelected = Test-ChromeTabSelected -Tab $tab
+            }
+          } catch {
+            continue
+          }
+        }
+      } catch {
+        continue
+      }
+    }
+  } catch {
+    return @()
+  }
+
+  return $tabs
+}
+
 while ($true) {
   try {
     $foreground = $null
+    $chromeTab = $null
+    $foregroundWindowId = $null
     $hwnd = [FocusGateActivityInterop]::GetForegroundWindow()
     if ($hwnd -ne [IntPtr]::Zero) {
+      $foregroundWindowId = ([Int64]$hwnd).ToString()
       $foregroundPid = 0
       [FocusGateActivityInterop]::GetWindowThreadProcessId($hwnd, [ref]$foregroundPid) | Out-Null
       if ($foregroundPid) {
@@ -451,14 +684,23 @@ while ($true) {
           pid = [int]$foregroundPid
           name = Normalize-ExeName $process.ProcessName
         }
+        $chromeTab = Get-ChromeTabObservation -Hwnd $hwnd -ProcessName $process.ProcessName
       }
     }
+
+    $mediaApps = @(Get-MediaApps)
+    $hasChromeAudio = ($mediaApps | Where-Object { $_ -and $_.name -eq 'chrome.exe' } | Select-Object -First 1) -ne $null
+    $chromeAudibleTabs = @(Get-ChromeAudibleTabs -ShouldScan ($hasChromeAudio -or $hadAudibleChromeTabs))
+    $hadAudibleChromeTabs = $chromeAudibleTabs.Count -gt 0
 
     $sample = @{
       timestamp = [DateTime]::UtcNow.ToString('o')
       foreground = $foreground
       idleMs = Get-IdleMilliseconds
-      mediaApps = @(Get-MediaApps)
+      mediaApps = $mediaApps
+      chromeTab = $chromeTab
+      foregroundWindowId = $foregroundWindowId
+      chromeAudibleTabs = $chromeAudibleTabs
     }
 
     $sample | ConvertTo-Json -Compress -Depth 5

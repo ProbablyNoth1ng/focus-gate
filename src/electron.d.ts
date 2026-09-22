@@ -42,6 +42,9 @@ declare global {
       hideApp: (appName: string) => Promise<string[]>
       unhideApp: (appName: string) => Promise<string[]>
       getActivityForDate: (date: string) => Promise<ActivityForDateResult>
+      removeAppActivity: (date: string, appName: string) => Promise<{ success: boolean }>
+      removeChromeWebsiteActivity: (date: string, websiteKey: string) => Promise<{ success: boolean }>
+      removeChromePageActivity: (date: string, websiteKey: string, pageKey: string) => Promise<{ success: boolean }>
       onInterceptionStart: (cb: (payload: InterceptionPayload) => void) => () => void
       onSettingsUpdated: (cb: (settings: AppSettings) => void) => () => void
       windowMinimize: () => void

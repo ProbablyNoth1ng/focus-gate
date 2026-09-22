@@ -23,6 +23,9 @@ export const IPC = {
   HIDE_APP:            'activity:hideApp',
   UNHIDE_APP:          'activity:unhideApp',
   GET_ACTIVITY_FOR_DATE: 'activity:getForDate',
+  REMOVE_APP_ACTIVITY: 'activity:removeApp',
+  REMOVE_CHROME_WEBSITE_ACTIVITY: 'activity:removeChromeWebsite',
+  REMOVE_CHROME_PAGE_ACTIVITY: 'activity:removeChromePage',
 } as const
 
 export type IpcKey = typeof IPC[keyof typeof IPC]
@@ -38,6 +41,7 @@ export interface BlockedApp {
 export interface AppSettings {
   blockedApps: BlockedApp[]
   hiddenApps: string[]       // app names hidden from activity tracking
+  trackIncognitoTabs: boolean
   minWordCount: number
   countdownDelay: number   // seconds
   focusHoursEnabled: boolean
@@ -52,6 +56,7 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   blockedApps: [],
   hiddenApps: [],
+  trackIncognitoTabs: false,
   minWordCount: 10,
   countdownDelay: 10,
   focusHoursEnabled: false,
@@ -104,6 +109,38 @@ export interface AppUsageSummary {
   total_seconds: number
 }
 
+export interface ChromeTabObservation {
+  title: string
+  url: string
+  privacyMode: 'normal' | 'incognito' | 'unknown'
+}
+
+export interface ChromeAudibleTabObservation extends ChromeTabObservation {
+  windowId: string
+  isSelected: boolean
+}
+
+export interface ChromeTabIdentity {
+  websiteKey: string
+  websiteLabel: string
+  pageKey: string
+  pageTitle: string
+  identitySource: 'url' | 'title'
+}
+
+export interface ChromePageUsageSummary {
+  page_key: string
+  title: string
+  total_seconds: number
+}
+
+export interface ChromeWebsiteUsageSummary {
+  website_key: string
+  website_label: string
+  total_seconds: number
+  pages: ChromePageUsageSummary[]
+}
+
 export interface DailyUsage {
   date: string
   total_seconds: number
@@ -116,6 +153,7 @@ export interface ActivityData {
 
 export interface ActivityForDateResult {
   apps: { app_name: string; total_seconds: number }[]
+  chromeWebsites: ChromeWebsiteUsageSummary[]
   hasPrevDay: boolean
   hasNextDay: boolean
   isToday: boolean

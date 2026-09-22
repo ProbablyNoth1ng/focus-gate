@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { applicationSessionRegistry } from './applicationSessionRegistry'
 import { debugLog } from './debugLog'
+import type { ChromeAudibleTabObservation, ChromeTabObservation } from '../shared/ipc-types'
 
 export interface ForegroundProcessInfo {
   pid: number
@@ -14,6 +15,9 @@ export interface ActivitySample {
   foreground: ForegroundProcessInfo | null
   idleMs: number
   mediaApps: ForegroundProcessInfo[]
+  chromeTab: ChromeTabObservation | null
+  foregroundWindowId: string | null
+  chromeAudibleTabs: ChromeAudibleTabObservation[]
 }
 
 let wmiProcess: ChildProcess | null = null
@@ -279,7 +283,7 @@ export function stopForegroundWatcher() {
   foregroundProcess = null
 }
 
-function parseActivitySample(raw: string): ActivitySample | null {
+export function __parseActivitySample(raw: string): ActivitySample | null {
   try {
     const parsed = JSON.parse(raw) as Partial<ActivitySample>
     if (typeof parsed.timestamp !== 'string') return null
@@ -302,11 +306,56 @@ function parseActivitySample(raw: string): ActivitySample | null {
           .filter((item): item is ForegroundProcessInfo => item !== null)
       : []
 
+    const normalizePrivacyMode = (value: unknown): ChromeTabObservation['privacyMode'] | null => {
+      if (value !== 'normal' && value !== 'incognito' && value !== 'unknown') {
+        return null
+      }
+      return value
+    }
+
+    const normalizeChromeTab = (value: unknown): ChromeTabObservation | null => {
+      if (!value || typeof value !== 'object') return null
+      const candidate = value as Partial<ChromeTabObservation>
+      if (typeof candidate.title !== 'string') return null
+      if (typeof candidate.url !== 'string') return null
+      const privacyMode = normalizePrivacyMode(candidate.privacyMode)
+      if (!privacyMode) return null
+      return {
+        title: candidate.title,
+        url: candidate.url,
+        privacyMode,
+      }
+    }
+
+    const normalizeAudibleChromeTab = (value: unknown): ChromeAudibleTabObservation | null => {
+      const base = normalizeChromeTab(value)
+      if (!base || !value || typeof value !== 'object') return null
+      const candidate = value as Partial<ChromeAudibleTabObservation>
+      if (typeof candidate.windowId !== 'string' || !candidate.windowId.trim()) return null
+      if (typeof candidate.isSelected !== 'boolean') return null
+      return {
+        ...base,
+        windowId: candidate.windowId,
+        isSelected: candidate.isSelected,
+      }
+    }
+
+    const foregroundWindowId = typeof parsed.foregroundWindowId === 'string' && parsed.foregroundWindowId.trim()
+      ? parsed.foregroundWindowId
+      : null
+
     return {
       timestamp: parsed.timestamp,
       foreground,
       idleMs: parsed.idleMs,
       mediaApps,
+      chromeTab: normalizeChromeTab(parsed.chromeTab),
+      foregroundWindowId,
+      chromeAudibleTabs: Array.isArray(parsed.chromeAudibleTabs)
+        ? parsed.chromeAudibleTabs
+            .map((item) => normalizeAudibleChromeTab(item))
+            .filter((item): item is ChromeAudibleTabObservation => item !== null)
+        : [],
     }
   } catch {
     return null
@@ -348,11 +397,11 @@ export function startActivitySampler(
     for (const line of lines) {
       const trimmed = line.trim()
       if (!trimmed) continue
-      const sample = parseActivitySample(trimmed)
+      const sample = __parseActivitySample(trimmed)
       if (!sample) {
         activitySampleParseFailures += 1
         if (activitySampleParseFailures <= 3 || activitySampleParseFailures % 20 === 0) {
-          console.warn(`[ACTIVITY] Failed to parse sampler output #${activitySampleParseFailures}: ${trimmed.slice(0, 240)}`)
+          console.warn(`[ACTIVITY] Failed to parse sampler output #${activitySampleParseFailures}`)
         }
         continue
       }
