@@ -66,6 +66,7 @@ export function Settings({ settings, onSave }: SettingsProps) {
   const [localDarkMode, setLocalDarkMode] = useState(settings.darkMode)
   const [localFocusHoursEnabled, setLocalFocusHoursEnabled] = useState(settings.focusHoursEnabled)
   const [localTrackIncognitoTabs, setLocalTrackIncognitoTabs] = useState(settings.trackIncognitoTabs)
+  const [localTrackBackgroundAudio, setLocalTrackBackgroundAudio] = useState(settings.trackBackgroundAudio)
 
   useEffect(() => { setHiddenApps(settings.hiddenApps ?? []) }, [settings.hiddenApps])
   useEffect(() => { setMinWordCount(settings.minWordCount) }, [settings.minWordCount])
@@ -76,6 +77,7 @@ export function Settings({ settings, onSave }: SettingsProps) {
   useEffect(() => { setLocalDarkMode(settings.darkMode) }, [settings.darkMode])
   useEffect(() => { setLocalFocusHoursEnabled(settings.focusHoursEnabled) }, [settings.focusHoursEnabled])
   useEffect(() => { setLocalTrackIncognitoTabs(settings.trackIncognitoTabs) }, [settings.trackIncognitoTabs])
+  useEffect(() => { setLocalTrackBackgroundAudio(settings.trackBackgroundAudio) }, [settings.trackBackgroundAudio])
 
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingPartial = useRef<Partial<AppSettings>>({})
@@ -298,6 +300,18 @@ export function Settings({ settings, onSave }: SettingsProps) {
             onChange={v => {
               setLocalTrackIncognitoTabs(v)
               debouncedSave({ trackIncognitoTabs: v })
+            }}
+          />
+        </FieldRow>
+        <FieldRow
+          label="Track apps playing audio in background"
+          hint="Count apps producing sound even when they are not focused."
+        >
+          <Toggle
+            checked={localTrackBackgroundAudio}
+            onChange={v => {
+              setLocalTrackBackgroundAudio(v)
+              debouncedSave({ trackBackgroundAudio: v })
             }}
           />
         </FieldRow>

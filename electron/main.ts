@@ -34,6 +34,7 @@ import { registerIpcHandlers } from './ipcHandlers'
 import { setAutostart } from './autostart'
 import { debugLog, getDebugLogPath } from './debugLog'
 import { deriveChromeUsageIdentities } from './chromeTabIdentity'
+import { getActivityAttribution } from './activityAttribution'
 
 const store = new Store<AppSettings>({ defaults: DEFAULT_SETTINGS })
 
@@ -158,42 +159,19 @@ function trackActivitySample(sample: ActivitySample): void {
   const elapsedSeconds = Math.max(1, Math.min(10, Math.round((sampledAt - lastActivitySampleAt) / 1000)))
   lastActivitySampleAt = sampledAt
 
-  const trackedApps = new Set<string>()
+  const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
+  const attribution = getActivityAttribution(sample, settings)
+  if (!attribution.countDailyScreenTime) return
 
-  const addTrackedApp = (name: string | null | undefined) => {
-    if (!name) return
-    if (isSystemProcess(name) || !isRealApp(name)) return
-    trackedApps.add(name.replace(/\.exe$/i, '').toLowerCase())
-  }
-
-  if (sample.foreground && sample.idleMs <= 120_000) {
-    addTrackedApp(sample.foreground.name)
-  }
-
-  for (const mediaApp of sample.mediaApps) {
-    addTrackedApp(mediaApp.name)
-  }
-
-  if (sample.chromeAudibleTabs.length > 0) {
-    addTrackedApp('chrome.exe')
-  }
-
-  if (trackedApps.size === 0) return
-
-  for (const appName of trackedApps) {
+  for (const appName of attribution.appNames) {
     accumulateUsage(appName, elapsedSeconds)
   }
   accumulateDailyScreenTime(elapsedSeconds)
 
-  const foregroundName = sample.foreground?.name.replace(/\.exe$/i, '').toLowerCase()
-  const focusedTab = foregroundName === 'chrome' && sample.idleMs <= 120_000
-    ? sample.chromeTab
-    : null
-  if (focusedTab || sample.chromeAudibleTabs.length > 0) {
-    const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
+  if (attribution.focusedChromeTab || attribution.audibleChromeTabs.length > 0) {
     const identities = deriveChromeUsageIdentities({
-      focusedTab,
-      audibleTabs: sample.chromeAudibleTabs,
+      focusedTab: attribution.focusedChromeTab,
+      audibleTabs: attribution.audibleChromeTabs,
       foregroundChromeWindowId: sample.foregroundWindowId,
       trackIncognitoTabs: settings.trackIncognitoTabs,
     })

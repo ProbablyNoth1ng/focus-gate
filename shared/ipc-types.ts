@@ -42,6 +42,7 @@ export interface AppSettings {
   blockedApps: BlockedApp[]
   hiddenApps: string[]       // app names hidden from activity tracking
   trackIncognitoTabs: boolean
+  trackBackgroundAudio: boolean
   minWordCount: number
   countdownDelay: number   // seconds
   focusHoursEnabled: boolean
@@ -57,6 +58,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   blockedApps: [],
   hiddenApps: [],
   trackIncognitoTabs: false,
+  trackBackgroundAudio: false,
   minWordCount: 10,
   countdownDelay: 10,
   focusHoursEnabled: false,
