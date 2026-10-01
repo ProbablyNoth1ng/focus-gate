@@ -52,9 +52,11 @@ export function ActivityTimeline({ timeline, icons, selectedDate, loading, error
     return values
   }, [timeline.start_timestamp, timeline.end_timestamp, zoomHours])
 
-  if (loading) return <TimelineCard>Loading timeline…</TimelineCard>
-  if (error) return <TimelineCard>Timeline could not be loaded.</TimelineCard>
-  if (timeline.rows.length === 0 || !timeline.rows.some(row => row.segments.length > 0)) {
+  const hasTimelineData = timeline.rows.some(row => row.segments.length > 0)
+
+  if (loading && !hasTimelineData) return <TimelineCard>Loading timeline…</TimelineCard>
+  if (error && !hasTimelineData) return <TimelineCard>Timeline could not be loaded.</TimelineCard>
+  if (!hasTimelineData) {
     return <TimelineCard>No timeline recorded for this day</TimelineCard>
   }
 
