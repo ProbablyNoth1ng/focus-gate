@@ -15,6 +15,7 @@ import {
   logIntention,
   logInterceptionResult,
   getActivityForDate,
+  getActivityTimelineForDate,
   getChromeTabUsageForDate,
   hasVisibleActivityForDate,
   removeAppActivity,
@@ -153,6 +154,7 @@ export function registerIpcHandlers(
     const hiddenApps: string[] = store.get('hiddenApps', []) as string[]
     const apps = getActivityForDate(date, hiddenApps)
     const chromeWebsites = getChromeTabUsageForDate(date, hiddenApps)
+    const timeline = getActivityTimelineForDate(date, hiddenApps)
     
     // Use Date.UTC to avoid local timezone shifting the date
     const [y, m, d] = date.split('-').map(Number)
@@ -164,6 +166,7 @@ export function registerIpcHandlers(
     return {
       apps,
       chromeWebsites,
+      timeline,
       hasPrevDay: hasVisibleActivityForDate(prevDateStr, hiddenApps),
       hasNextDay: nextDateStr <= today && hasVisibleActivityForDate(nextDateStr, hiddenApps),
       isToday: date === today,

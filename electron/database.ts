@@ -5,6 +5,7 @@ import { app } from 'electron'
 import initSqlJs, { Database, SqlJsStatic } from 'sql.js'
 import type { ChromeTabIdentity, ChromeWebsiteUsageSummary, IntentionLog, StatsData } from '../shared/ipc-types'
 import { normalizeChromeWebsiteIdentityFromTitle } from './chromeTabIdentity'
+import { normalizeTimelineSpans, observedTimelineDurationSeconds, splitSpanByLocalDate, type TimelineMode, type TimelineSource, type TimelineSpan } from './appUsageTimeline'
 
 let db: Database
 let SQL: SqlJsStatic
@@ -112,6 +113,19 @@ export function __createTestDatabase(): void {
       UNIQUE(date, page_key)
     );
 
+    CREATE TABLE IF NOT EXISTS app_usage_spans (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      app_name TEXT NOT NULL,
+      date TEXT NOT NULL,
+      start_timestamp INTEGER NOT NULL,
+      end_timestamp INTEGER NOT NULL,
+      mode TEXT NOT NULL CHECK(mode IN ('foreground', 'audio')),
+      source TEXT NOT NULL CHECK(source IN ('sampler', 'fallback')),
+      website_key TEXT,
+      page_key TEXT,
+      CHECK(end_timestamp > start_timestamp)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_activity_timestamp   ON app_activity(timestamp);
     CREATE INDEX IF NOT EXISTS idx_activity_name        ON app_activity(app_name);
     CREATE INDEX IF NOT EXISTS idx_logs_timestamp       ON intention_logs(timestamp);
@@ -119,6 +133,8 @@ export function __createTestDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_app_usage_date       ON app_usage(date);
     CREATE INDEX IF NOT EXISTS idx_chrome_tab_usage_date ON chrome_tab_usage(date);
     CREATE INDEX IF NOT EXISTS idx_chrome_tab_usage_site ON chrome_tab_usage(date, website_key);
+    CREATE INDEX IF NOT EXISTS idx_app_usage_spans_date_app ON app_usage_spans(date, app_name);
+    CREATE INDEX IF NOT EXISTS idx_app_usage_spans_date_page ON app_usage_spans(date, page_key);
   `)
 }
 
@@ -146,7 +162,7 @@ export function flushPendingPersist(): void {
   persistNow()
 }
 
-function queryAll<T>(sql: string, params: (string | number)[] = []): T[] {
+function queryAll<T>(sql: string, params: (string | number | null)[] = []): T[] {
   const stmt = db.prepare(sql)
   stmt.bind(params)
   const rows: T[] = []
@@ -157,7 +173,7 @@ function queryAll<T>(sql: string, params: (string | number)[] = []): T[] {
   return rows
 }
 
-function queryOne<T>(sql: string, params: (string | number)[] = []): T | undefined {
+function queryOne<T>(sql: string, params: (string | number | null)[] = []): T | undefined {
   const results = queryAll<T>(sql, params)
   return results[0]
 }
@@ -379,6 +395,7 @@ export function clearActivity(): void {
   db.run('DELETE FROM app_usage')
   db.run('DELETE FROM daily_screen_time')
   db.run('DELETE FROM chrome_tab_usage')
+  db.run('DELETE FROM app_usage_spans')
   persistNow()
 }
 
@@ -390,6 +407,7 @@ export function clearAll(): void {
   db.run('DELETE FROM app_usage')
   db.run('DELETE FROM daily_screen_time')
   db.run('DELETE FROM chrome_tab_usage')
+  db.run('DELETE FROM app_usage_spans')
   persistNow()
 }
 
@@ -402,6 +420,11 @@ export function removeAppActivity(date: string, appName: string): void {
     `DELETE FROM app_usage
      WHERE date = ?
        AND REPLACE(LOWER(app_name), '.exe', '') = ?`,
+    [date, normalizedName]
+  )
+  db.run(
+    `DELETE FROM app_usage_spans
+     WHERE date = ? AND REPLACE(LOWER(app_name), '.exe', '') = ?`,
     [date, normalizedName]
   )
   db.run(
@@ -430,6 +453,7 @@ export function removeChromeWebsiteActivity(date: string, websiteKey: string): v
   try {
     for (const row of rowsToRemove) {
       db.run('DELETE FROM chrome_tab_usage WHERE date = ? AND page_key = ?', [date, row.page_key])
+      db.run('DELETE FROM app_usage_spans WHERE date = ? AND page_key = ?', [date, row.page_key])
     }
     decreaseChromeAppUsageForDate(date, removedSeconds)
     db.run('COMMIT')
@@ -466,6 +490,7 @@ export function removeChromePageActivity(date: string, websiteKey: string, pageK
   try {
     for (const row of rowsToRemove) {
       db.run('DELETE FROM chrome_tab_usage WHERE date = ? AND page_key = ?', [date, row.page_key])
+      db.run('DELETE FROM app_usage_spans WHERE date = ? AND page_key = ?', [date, row.page_key])
     }
     decreaseChromeAppUsageForDate(date, removedSeconds)
     db.run('COMMIT')
@@ -502,6 +527,81 @@ export function accumulateDailyScreenTime(seconds: number): void {
     [today, increment]
   )
   schedulePersist()
+}
+
+export function recordUsageSpan(span: TimelineSpan): void {
+  if (!db || !span.app_name.trim()) return
+  if (!Number.isFinite(span.start_timestamp) || !Number.isFinite(span.end_timestamp) || span.end_timestamp <= span.start_timestamp) return
+
+  for (const piece of splitSpanByLocalDate(span)) {
+    const appName = normalizeAppActivityName(span.app_name)
+    const previous = queryOne<{ id: number }>(
+      `SELECT id FROM app_usage_spans
+       WHERE app_name = ? AND date = ? AND end_timestamp = ? AND mode = ? AND source = ?
+         AND website_key IS ? AND page_key IS ?
+       ORDER BY id DESC LIMIT 1`,
+      [appName, piece.date, piece.start_timestamp, span.mode, span.source, span.website_key, span.page_key]
+    )
+    if (previous) {
+      db.run('UPDATE app_usage_spans SET end_timestamp = ? WHERE id = ?', [piece.end_timestamp, previous.id])
+    } else {
+      db.run(
+        `INSERT INTO app_usage_spans (
+          app_name, date, start_timestamp, end_timestamp, mode, source, website_key, page_key
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [appName, piece.date, piece.start_timestamp, piece.end_timestamp, span.mode, span.source, span.website_key, span.page_key]
+      )
+    }
+  }
+  schedulePersist()
+}
+
+export interface ActivityTimelineRow {
+  app_name: string
+  total_seconds: number
+  recorded_seconds: number
+  segments: Array<{
+    start_timestamp: number
+    end_timestamp: number
+    mode: TimelineMode
+    source: TimelineSource
+  }>
+}
+
+export function getActivityTimelineForDate(date: string, hiddenApps: string[]): {
+  start_timestamp: number
+  end_timestamp: number
+  rows: ActivityTimelineRow[]
+} {
+  const [year, month, day] = date.split('-').map(Number)
+  const start_timestamp = new Date(year, month - 1, day).getTime()
+  const end_timestamp = new Date(year, month - 1, day + 1).getTime()
+  if (!db) return { start_timestamp, end_timestamp, rows: [] }
+
+  const hidden = new Set(hiddenApps.map(normalizeAppActivityName))
+  const spans = queryAll<TimelineSpan>(
+    `SELECT app_name, start_timestamp, end_timestamp, mode, source, website_key, page_key
+     FROM app_usage_spans WHERE date = ? ORDER BY start_timestamp, end_timestamp, id`,
+    [date]
+  ).filter(span => !hidden.has(normalizeAppActivityName(span.app_name)))
+  const normalized = normalizeTimelineSpans(spans)
+  const rows: ActivityTimelineRow[] = []
+  for (const [appName, segments] of normalized) {
+    const recorded_seconds = observedTimelineDurationSeconds(spans.filter(span => normalizeAppActivityName(span.app_name) === appName))
+    rows.push({
+      app_name: appName,
+      total_seconds: recorded_seconds,
+      recorded_seconds,
+      segments: segments.map(({ start_timestamp: segmentStart, end_timestamp: segmentEnd, mode, source }) => ({
+        start_timestamp: segmentStart,
+        end_timestamp: segmentEnd,
+        mode,
+        source,
+      })),
+    })
+  }
+  rows.sort((left, right) => right.total_seconds - left.total_seconds || left.app_name.localeCompare(right.app_name))
+  return { start_timestamp, end_timestamp, rows }
 }
 
 export function accumulateChromeTabUsage(identity: ChromeTabIdentity & { date: string }, seconds: number): void {

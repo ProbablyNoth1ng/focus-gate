@@ -8,6 +8,8 @@ interface ActivityAttributionSettings {
 
 export interface ActivityAttribution {
   appNames: string[]
+  foregroundAppName: string | null
+  audioAppNames: string[]
   focusedChromeTab: ChromeTabObservation | null
   audibleChromeTabs: ChromeAudibleTabObservation[]
   countDailyScreenTime: boolean
@@ -24,24 +26,29 @@ export function getActivityAttribution(
   settings: ActivityAttributionSettings
 ): ActivityAttribution {
   const appNames = new Set<string>()
+  const audioAppNames = new Set<string>()
   const userIsActive = sample.idleMs <= 120_000
 
-  const addTrackedApp = (name: string | null | undefined) => {
+  const addTrackedApp = (name: string | null | undefined, audio = false) => {
     const normalized = normalizeTrackedAppName(name)
-    if (normalized) appNames.add(normalized)
+    if (normalized) {
+      appNames.add(normalized)
+      if (audio) audioAppNames.add(normalized)
+    }
   }
 
-  if (sample.foreground && userIsActive) {
-    addTrackedApp(sample.foreground.name)
-  }
+  const foregroundAppName = sample.foreground && userIsActive
+    ? normalizeTrackedAppName(sample.foreground.name)
+    : null
+  if (foregroundAppName) appNames.add(foregroundAppName)
 
   if (settings.trackBackgroundAudio) {
     for (const mediaApp of sample.mediaApps) {
-      addTrackedApp(mediaApp.name)
+      addTrackedApp(mediaApp.name, true)
     }
 
     if (sample.chromeAudibleTabs.length > 0) {
-      addTrackedApp('chrome.exe')
+      addTrackedApp('chrome.exe', true)
     }
   }
 
@@ -52,6 +59,8 @@ export function getActivityAttribution(
 
   return {
     appNames: [...appNames],
+    foregroundAppName,
+    audioAppNames: [...audioAppNames],
     focusedChromeTab,
     audibleChromeTabs: settings.trackBackgroundAudio ? sample.chromeAudibleTabs : [],
     countDailyScreenTime: appNames.size > 0,

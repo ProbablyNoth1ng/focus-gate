@@ -12,6 +12,8 @@ const {
   clearAll,
   getActivityData,
   getActivityForDate,
+  getActivityTimelineForDate,
+  recordUsageSpan,
   getChromeTabUsageForDate,
   removeAppActivity,
   removeChromeWebsiteActivity,
@@ -427,5 +429,73 @@ test('removing Chrome page time clamps app total to zero and normalizes historic
     assert.deepEqual(getActivityForDate(new Date().toLocaleDateString('en-CA'), []), [
       { app_name: 'chrome', total_seconds: 15 },
     ])
+  })
+})
+
+test('records contiguous spans, preserves a positive gap, and uses recorded coverage as the row total', async () => {
+  await withDb((db) => {
+    db.run("INSERT INTO app_usage (app_name, date, seconds) VALUES ('code', '2026-09-19', 30)")
+    recordUsageSpan({ app_name: 'code', start_timestamp: new Date(2026, 8, 19, 10, 0).getTime(), end_timestamp: new Date(2026, 8, 19, 10, 0, 5).getTime(), mode: 'foreground', source: 'sampler', website_key: null, page_key: null })
+    recordUsageSpan({ app_name: 'code', start_timestamp: new Date(2026, 8, 19, 10, 0, 5).getTime(), end_timestamp: new Date(2026, 8, 19, 10, 0, 10).getTime(), mode: 'foreground', source: 'sampler', website_key: null, page_key: null })
+    recordUsageSpan({ app_name: 'code', start_timestamp: new Date(2026, 8, 19, 10, 1, 10).getTime(), end_timestamp: new Date(2026, 8, 19, 10, 1, 13).getTime(), mode: 'foreground', source: 'sampler', website_key: null, page_key: null })
+
+    const timeline = getActivityTimelineForDate('2026-09-19', [])
+    assert.equal(timeline.rows[0].total_seconds, 13)
+    assert.equal(timeline.rows[0].recorded_seconds, 13)
+    assert.equal(timeline.rows[0].segments.length, 2)
+  })
+})
+
+test('timeline merges a short recorded gap without counting it as activity', async () => {
+  await withDb((db) => {
+    db.run("INSERT INTO app_usage (app_name, date, seconds) VALUES ('code', '2026-09-19', 10)")
+    const start = new Date(2026, 8, 19, 10, 0).getTime()
+    recordUsageSpan({ app_name: 'code', start_timestamp: start, end_timestamp: start + 2_150, mode: 'foreground', source: 'sampler', website_key: null, page_key: null })
+    recordUsageSpan({ app_name: 'code', start_timestamp: start + 2_300, end_timestamp: start + 4_450, mode: 'foreground', source: 'sampler', website_key: null, page_key: null })
+
+    const timeline = getActivityTimelineForDate('2026-09-19', [])
+    assert.equal(timeline.rows[0].segments.length, 1)
+    assert.equal(timeline.rows[0].segments[0].end_timestamp - timeline.rows[0].segments[0].start_timestamp, 4_450)
+    assert.equal(timeline.rows[0].recorded_seconds, 4.3)
+  })
+})
+
+test('omits usage-only historical rows from the timeline', async () => {
+  await withDb((db) => {
+    db.run("INSERT INTO app_usage (app_name, date, seconds) VALUES ('legacy-app', '2026-09-19', 600)")
+    assert.deepEqual(getActivityTimelineForDate('2026-09-19', []).rows, [])
+  })
+})
+
+test('removing a Chrome page works after its short gap was merged for display', async () => {
+  await withDb((db) => {
+    db.run("INSERT INTO app_usage (app_name, date, seconds) VALUES ('chrome', '2026-09-19', 20)")
+    for (const [pageKey, startOffset] of [['url:keep', 0], ['url:remove', 2_300]]) {
+      accumulateChromeTabUsage({ date: '2026-09-19', websiteKey: 'host:example.com', websiteLabel: 'example.com', pageKey, pageTitle: pageKey, identitySource: 'url' }, 10)
+      const start = new Date(2026, 8, 19, 10, 0).getTime() + startOffset
+      recordUsageSpan({ app_name: 'chrome', start_timestamp: start, end_timestamp: start + 2_150, mode: 'audio', source: 'sampler', website_key: 'host:example.com', page_key: pageKey })
+    }
+    assert.equal(getActivityTimelineForDate('2026-09-19', []).rows[0].segments.length, 1)
+    removeChromePageActivity('2026-09-19', 'host:example.com', 'url:remove')
+    const timeline = getActivityTimelineForDate('2026-09-19', [])
+    assert.equal(timeline.rows[0].segments.length, 1)
+    assert.equal(timeline.rows[0].segments[0].end_timestamp - timeline.rows[0].segments[0].start_timestamp, 2_150)
+  })
+})
+
+test('clearing and app removal delete their timeline spans while invalid intervals are ignored', async () => {
+  await withDb(() => {
+    const span = { app_name: 'code', start_timestamp: new Date(2026, 8, 19, 10, 0).getTime(), end_timestamp: new Date(2026, 8, 19, 10, 0, 5).getTime(), mode: 'foreground', source: 'sampler', website_key: null, page_key: null }
+    recordUsageSpan({ ...span, end_timestamp: span.start_timestamp })
+    assert.equal(getActivityTimelineForDate('2026-09-19', []).rows.length, 0)
+    recordUsageSpan(span)
+    removeAppActivity('2026-09-19', 'code')
+    assert.equal(getActivityTimelineForDate('2026-09-19', []).rows.length, 0)
+    recordUsageSpan(span)
+    clearActivity()
+    assert.equal(getActivityTimelineForDate('2026-09-19', []).rows.length, 0)
+    recordUsageSpan(span)
+    clearAll()
+    assert.equal(getActivityTimelineForDate('2026-09-19', []).rows.length, 0)
   })
 })

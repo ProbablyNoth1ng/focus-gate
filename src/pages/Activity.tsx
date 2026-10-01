@@ -1,7 +1,8 @@
-import { Fragment, useState, useEffect, useCallback } from 'react'
+import { Fragment, useState, useEffect, useCallback, useRef } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import type { ActivityData, ActivityForDateResult, ChromeWebsiteUsageSummary } from '../../shared/ipc-types'
 import { IoChevronBack, IoChevronForward, IoChevronDown, IoBarChartOutline, IoClose } from 'react-icons/io5'
+import { ActivityTimeline } from '../components/ActivityTimeline'
 
 function formatDuration(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600)
@@ -44,6 +45,9 @@ export function Activity() {
   })
   const today = new Date().toLocaleDateString('en-CA')
   const [dayData, setDayData] = useState<ActivityForDateResult | null>(null)
+  const [dayLoading, setDayLoading] = useState(true)
+  const [dayError, setDayError] = useState(false)
+  const dayRequestId = useRef(0)
   const [expandedChrome, setExpandedChrome] = useState(false)
   const [expandedWebsites, setExpandedWebsites] = useState<Set<string>>(() => new Set())
 
@@ -66,8 +70,13 @@ export function Activity() {
   }, [])
 
   const loadDayData = useCallback(async () => {
+    const requestedDate = selectedDate
+    const requestId = ++dayRequestId.current
+    setDayLoading(true)
+    setDayError(false)
     try {
-      const result = await window.electronAPI.getActivityForDate(selectedDate)
+      const result = await window.electronAPI.getActivityForDate(requestedDate)
+      if (requestId !== dayRequestId.current) return
       setDayData(result)
       setExpandedChrome((current) => current && result.chromeWebsites.length > 0)
       setExpandedWebsites((current) => {
@@ -82,6 +91,9 @@ export function Activity() {
       }
     } catch (err) {
       console.error('Failed to load day data:', err)
+      if (requestId === dayRequestId.current) setDayError(true)
+    } finally {
+      if (requestId === dayRequestId.current) setDayLoading(false)
     }
   }, [selectedDate])
 
@@ -373,6 +385,17 @@ export function Activity() {
           </BarChart>
         </ResponsiveContainer>
       </ChartCard>
+      <ActivityTimeline
+        timeline={dayData?.timeline ?? {
+          start_timestamp: new Date(selectedDate).getTime(),
+          end_timestamp: new Date(selectedDate).getTime() + 24 * 60 * 60 * 1000,
+          rows: [],
+        }}
+        icons={icons}
+        selectedDate={selectedDate}
+        loading={dayLoading}
+        error={dayError}
+      />
     </div>
   )
 }
