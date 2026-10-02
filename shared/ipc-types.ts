@@ -156,6 +156,21 @@ export interface ActivityData {
 export interface ActivityForDateResult {
   apps: { app_name: string; total_seconds: number }[]
   chromeWebsites: ChromeWebsiteUsageSummary[]
+  timeline: {
+    start_timestamp: number
+    end_timestamp: number
+    rows: {
+      app_name: string
+      total_seconds: number
+      recorded_seconds: number
+      segments: {
+        start_timestamp: number
+        end_timestamp: number
+        mode: 'foreground' | 'audio'
+        source: 'sampler' | 'fallback'
+      }[]
+    }[]
+  }
   hasPrevDay: boolean
   hasNextDay: boolean
   isToday: boolean

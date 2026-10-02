@@ -6,7 +6,7 @@ import {
 import path from 'path'
 import Store from 'electron-store'
 import { AppSettings, DEFAULT_SETTINGS, IPC, InterceptionPayload } from '../shared/ipc-types'
-import { initDatabase, logActivity, logInterceptionResult, accumulateUsage, accumulateDailyScreenTime, accumulateChromeTabUsage, flushPendingPersist } from './database'
+import { initDatabase, logActivity, logInterceptionResult, accumulateUsage, accumulateDailyScreenTime, accumulateChromeTabUsage, recordUsageSpan, flushPendingPersist } from './database'
 import {
   ActivitySample,
   startWmiWatcher,
@@ -33,8 +33,9 @@ import { initTray, destroyTray } from './tray'
 import { registerIpcHandlers } from './ipcHandlers'
 import { setAutostart } from './autostart'
 import { debugLog, getDebugLogPath } from './debugLog'
-import { deriveChromeUsageIdentities } from './chromeTabIdentity'
+import { deriveChromeTabIdentity, deriveChromeUsageIdentities } from './chromeTabIdentity'
 import { getActivityAttribution } from './activityAttribution'
+import { getActivityInterval } from './activityTiming'
 
 const store = new Store<AppSettings>({ defaults: DEFAULT_SETTINGS })
 
@@ -117,7 +118,7 @@ function startActivityFallbackTimer(): void {
   let lastTickAt = Date.now()
   activityFallbackTimer = setInterval(() => {
     const now = Date.now()
-    const elapsedSeconds = Math.max(1, Math.min(10, Math.round((now - lastTickAt) / 1000)))
+    const interval = getActivityInterval(lastTickAt, now)
     lastTickAt = now
 
     const lastSampleAt = lastActivitySampleReceivedAt ?? activitySamplerStartedAt
@@ -134,8 +135,17 @@ function startActivityFallbackTimer(): void {
 
     if (!activityFallbackEnabled || !currentForegroundAppName) return
 
-    accumulateUsage(currentForegroundAppName, elapsedSeconds)
-    accumulateDailyScreenTime(elapsedSeconds)
+    accumulateUsage(currentForegroundAppName, interval.elapsed_seconds)
+    accumulateDailyScreenTime(interval.elapsed_seconds)
+    recordUsageSpan({
+      app_name: currentForegroundAppName,
+      start_timestamp: interval.start_timestamp,
+      end_timestamp: interval.end_timestamp,
+      mode: 'foreground',
+      source: 'fallback',
+      website_key: null,
+      page_key: null,
+    })
   }, ACTIVITY_FALLBACK_TICK_MS)
 
   activityFallbackTimer.unref?.()
@@ -156,7 +166,8 @@ function trackActivitySample(sample: ActivitySample): void {
     return
   }
 
-  const elapsedSeconds = Math.max(1, Math.min(10, Math.round((sampledAt - lastActivitySampleAt) / 1000)))
+  if (sampledAt <= lastActivitySampleAt) return
+  const interval = getActivityInterval(lastActivitySampleAt, sampledAt)
   lastActivitySampleAt = sampledAt
 
   const settings = { ...DEFAULT_SETTINGS, ...store.store } as AppSettings
@@ -164,9 +175,37 @@ function trackActivitySample(sample: ActivitySample): void {
   if (!attribution.countDailyScreenTime) return
 
   for (const appName of attribution.appNames) {
-    accumulateUsage(appName, elapsedSeconds)
+    accumulateUsage(appName, interval.elapsed_seconds)
   }
-  accumulateDailyScreenTime(elapsedSeconds)
+  accumulateDailyScreenTime(interval.elapsed_seconds)
+
+  const { start_timestamp: intervalStart, end_timestamp: intervalEnd } = interval
+  if (attribution.foregroundAppName) {
+    const focusedIdentity = attribution.foregroundAppName === 'chrome' && attribution.focusedChromeTab
+      ? deriveChromeTabIdentity(attribution.focusedChromeTab, settings.trackIncognitoTabs)
+      : null
+    recordUsageSpan({
+      app_name: attribution.foregroundAppName,
+      start_timestamp: intervalStart,
+      end_timestamp: intervalEnd,
+      mode: 'foreground',
+      source: 'sampler',
+      website_key: focusedIdentity?.websiteKey ?? null,
+      page_key: focusedIdentity?.pageKey ?? null,
+    })
+  }
+  for (const appName of attribution.audioAppNames) {
+    if (appName === 'chrome') continue
+    recordUsageSpan({
+      app_name: appName,
+      start_timestamp: intervalStart,
+      end_timestamp: intervalEnd,
+      mode: 'audio',
+      source: 'sampler',
+      website_key: null,
+      page_key: null,
+    })
+  }
 
   if (attribution.focusedChromeTab || attribution.audibleChromeTabs.length > 0) {
     const identities = deriveChromeUsageIdentities({
@@ -175,12 +214,37 @@ function trackActivitySample(sample: ActivitySample): void {
       foregroundChromeWindowId: sample.foregroundWindowId,
       trackIncognitoTabs: settings.trackIncognitoTabs,
     })
+    const foregroundIdentity = attribution.focusedChromeTab
+      ? deriveChromeTabIdentity(attribution.focusedChromeTab, settings.trackIncognitoTabs)
+      : null
+    const audioIdentities = foregroundIdentity ? identities.slice(1) : identities
     for (const identity of identities) {
       accumulateChromeTabUsage({
         ...identity,
         date: localDateFromTimestamp(sample.timestamp),
-      }, elapsedSeconds)
+      }, interval.elapsed_seconds)
     }
+    for (const identity of audioIdentities) {
+      recordUsageSpan({
+        app_name: 'chrome',
+        start_timestamp: intervalStart,
+        end_timestamp: intervalEnd,
+        mode: 'audio',
+        source: 'sampler',
+        website_key: identity.websiteKey,
+        page_key: identity.pageKey,
+      })
+    }
+  } else if (attribution.audioAppNames.includes('chrome')) {
+    recordUsageSpan({
+      app_name: 'chrome',
+      start_timestamp: intervalStart,
+      end_timestamp: intervalEnd,
+      mode: 'audio',
+      source: 'sampler',
+      website_key: null,
+      page_key: null,
+    })
   }
 }
 
@@ -440,6 +504,9 @@ app.whenReady().then(async () => {
     }
     if (activityFallbackEnabled) {
       setActivityFallbackEnabled(false, 'sampler recovered')
+      // The fallback already credited the gap. Start a fresh sampler interval to avoid overlap.
+      lastActivitySampleAt = Date.parse(sample.timestamp)
+      return
     }
     trackActivitySample(sample)
   }, scriptPath)

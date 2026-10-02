@@ -1,7 +1,8 @@
-import { Fragment, useState, useEffect, useCallback } from 'react'
+import { Fragment, useState, useEffect, useCallback, useRef } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import type { ActivityData, ActivityForDateResult, ChromeWebsiteUsageSummary } from '../../shared/ipc-types'
 import { IoChevronBack, IoChevronForward, IoChevronDown, IoBarChartOutline, IoClose } from 'react-icons/io5'
+import { ActivityTimeline } from '../components/ActivityTimeline'
 
 function formatDuration(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600)
@@ -44,6 +45,9 @@ export function Activity() {
   })
   const today = new Date().toLocaleDateString('en-CA')
   const [dayData, setDayData] = useState<ActivityForDateResult | null>(null)
+  const [dayLoading, setDayLoading] = useState(true)
+  const [dayError, setDayError] = useState(false)
+  const dayRequestId = useRef(0)
   const [expandedChrome, setExpandedChrome] = useState(false)
   const [expandedWebsites, setExpandedWebsites] = useState<Set<string>>(() => new Set())
 
@@ -56,7 +60,7 @@ export function Activity() {
       setData(d)
       if (d.apps.length > 0) {
         const iconResult = await window.electronAPI.getActivityIcons(d.apps.map(a => a.app_name.replace(/\.exe$/i, '')))
-        setIcons(iconResult)
+        setIcons(current => ({ ...current, ...iconResult }))
       }
     } finally {
       if (!background) {
@@ -66,8 +70,13 @@ export function Activity() {
   }, [])
 
   const loadDayData = useCallback(async () => {
+    const requestedDate = selectedDate
+    const requestId = ++dayRequestId.current
+    setDayLoading(true)
+    setDayError(false)
     try {
-      const result = await window.electronAPI.getActivityForDate(selectedDate)
+      const result = await window.electronAPI.getActivityForDate(requestedDate)
+      if (requestId !== dayRequestId.current) return
       setDayData(result)
       setExpandedChrome((current) => current && result.chromeWebsites.length > 0)
       setExpandedWebsites((current) => {
@@ -78,10 +87,13 @@ export function Activity() {
         const iconResult = await window.electronAPI.getActivityIcons(
           result.apps.map(a => a.app_name)
         )
-        setIcons(iconResult)
+        setIcons(current => ({ ...current, ...iconResult }))
       }
     } catch (err) {
       console.error('Failed to load day data:', err)
+      if (requestId === dayRequestId.current) setDayError(true)
+    } finally {
+      if (requestId === dayRequestId.current) setDayLoading(false)
     }
   }, [selectedDate])
 
@@ -162,11 +174,13 @@ export function Activity() {
     )
   }
 
+  const selectedDayData = dayData?.selectedDate === selectedDate ? dayData : null
+
   const hasAnyActivity =
     (data?.apps.length ?? 0) > 0 ||
     (data?.dailyUsage.length ?? 0) > 0 ||
-    (dayData?.apps.length ?? 0) > 0 ||
-    (dayData?.chromeWebsites.length ?? 0) > 0
+    (selectedDayData?.apps.length ?? 0) > 0 ||
+    (selectedDayData?.chromeWebsites.length ?? 0) > 0
 
   if (!hasAnyActivity) {
     return (
@@ -177,8 +191,8 @@ export function Activity() {
     )
   }
 
-  const sortedApps = [...(dayData?.apps ?? [])].sort((a, b) => b.total_seconds - a.total_seconds)
-  const chromeWebsites = dayData?.chromeWebsites ?? []
+  const sortedApps = [...(selectedDayData?.apps ?? [])].sort((a, b) => b.total_seconds - a.total_seconds)
+  const chromeWebsites = selectedDayData?.chromeWebsites ?? []
   const hasChromeBreakdown = chromeWebsites.length > 0
 
   return (
@@ -186,15 +200,15 @@ export function Activity() {
       <div className="text-center mb-4 px-1">
         <h2 className="text-sm font-semibold tracking-widest text-zinc-400">APP USAGE</h2>
         <p className={`text-xs mt-0.5 ${
-          dayData?.isToday ? 'text-emerald-400 font-semibold' : 'text-zinc-500'
+          selectedDayData?.isToday ? 'text-emerald-400 font-semibold' : 'text-zinc-500'
         }`}>
           {formatDisplayDate(selectedDate)}
-          {dayData?.isToday && ' (TODAY)'}
+          {selectedDayData?.isToday && ' (TODAY)'}
         </p>
       </div>
 
       <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>
-        {dayData?.apps.length || 0} apps tracked
+        {selectedDayData?.apps.length || 0} apps tracked
       </div>
 
       <div style={{
@@ -222,9 +236,9 @@ export function Activity() {
                 <th style={{ padding: '10px 8px', borderBottom: '1px solid var(--border)', width: 44, textAlign: 'center', verticalAlign: 'middle' }}>
                   <button
                     onClick={goToPrevDay}
-                    disabled={!dayData?.hasPrevDay}
+                    disabled={!selectedDayData?.hasPrevDay}
                     className={`inline-flex items-center justify-center w-7 h-7 rounded-lg transition-all duration-150 ${
-                      dayData?.hasPrevDay
+                      selectedDayData?.hasPrevDay
                         ? 'bg-zinc-600/90 text-zinc-100 hover:bg-zinc-500 hover:text-white shadow-sm'
                         : 'bg-zinc-300/60 text-zinc-300 cursor-not-allowed'
                     }`}
@@ -243,9 +257,9 @@ export function Activity() {
                 <th style={{ padding: '10px 8px', borderBottom: '1px solid var(--border)', width: 44, textAlign: 'center', verticalAlign: 'middle' }}>
                   <button
                     onClick={goToNextDay}
-                    disabled={!dayData?.hasNextDay || selectedDate >= today}
+                    disabled={!selectedDayData?.hasNextDay || selectedDate >= today}
                     className={`inline-flex items-center justify-center w-7 h-7 rounded-lg transition-all duration-150 ${
-                      dayData?.hasNextDay
+                      selectedDayData?.hasNextDay
                         ? 'bg-zinc-600/90 text-zinc-100 hover:bg-zinc-500 hover:text-white shadow-sm'
                         : 'bg-zinc-300/60 text-zinc-300 cursor-not-allowed'
                     }`}
@@ -369,10 +383,21 @@ export function Activity() {
               formatter={(value: number) => [formatDuration(value), 'Spent Time']}
               labelFormatter={(label: string) => `Date: ${label}`}
             />
-            <Bar dataKey="total_seconds" fill="var(--accent)" radius={[3, 3, 0, 0]} />
+            <Bar dataKey="total_seconds" fill="var(--accent)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
           </BarChart>
         </ResponsiveContainer>
       </ChartCard>
+      <ActivityTimeline
+        timeline={selectedDayData?.timeline ?? {
+          start_timestamp: new Date(selectedDate).getTime(),
+          end_timestamp: new Date(selectedDate).getTime() + 24 * 60 * 60 * 1000,
+          rows: [],
+        }}
+        icons={icons}
+        selectedDate={selectedDate}
+        loading={dayLoading}
+        error={dayError}
+      />
     </div>
   )
 }

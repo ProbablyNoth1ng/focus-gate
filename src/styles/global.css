@@ -223,3 +223,11 @@ button:disabled {
 .titlebar-no-drag button {
   font-family: 'Segoe MDL2 Assets';
 }
+
+.timeline-viewport {
+  scrollbar-width: none;
+}
+
+.timeline-viewport::-webkit-scrollbar {
+  display: none;
+}
