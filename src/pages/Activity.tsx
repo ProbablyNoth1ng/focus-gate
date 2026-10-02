@@ -58,10 +58,6 @@ export function Activity() {
     try {
       const d = await window.electronAPI.getActivity()
       setData(d)
-      if (d.apps.length > 0) {
-        const iconResult = await window.electronAPI.getActivityIcons(d.apps.map(a => a.app_name.replace(/\.exe$/i, '')))
-        setIcons(current => ({ ...current, ...iconResult }))
-      }
     } finally {
       if (!background) {
         setLoading(false)
@@ -83,11 +79,19 @@ export function Activity() {
         const availableKeys = new Set(result.chromeWebsites.map((website) => website.website_key))
         return new Set([...current].filter((websiteKey) => availableKeys.has(websiteKey)))
       })
-      if (result.apps.length > 0) {
-        const iconResult = await window.electronAPI.getActivityIcons(
-          result.apps.map(a => a.app_name)
-        )
-        setIcons(current => ({ ...current, ...iconResult }))
+
+      const appNames = [...new Set([
+        ...result.apps.map((app) => app.app_name),
+        ...result.timeline.rows.map((row) => row.app_name),
+      ])]
+      if (appNames.length > 0) {
+        void window.electronAPI.getActivityIcons(appNames)
+          .then((iconResult) => {
+            if (requestId === dayRequestId.current) {
+              setIcons((current) => ({ ...current, ...iconResult }))
+            }
+          })
+          .catch((err) => console.error('Failed to load activity icons:', err))
       }
     } catch (err) {
       console.error('Failed to load day data:', err)
